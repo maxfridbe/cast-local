@@ -750,7 +750,36 @@ namespace CastBlueScreen
                                                             bytesToDiscard -= read;
                                                         }
                                                     }
-                                                    await ffmpegStream.CopyToAsync(output);
+
+                                                    // Throttled copy loop to prevent Wi-Fi duplex congestion
+                                                    byte[] copyBuffer = new byte[65536]; // 64KB chunks
+                                                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                                                    long totalBytesSent = 0;
+                                                    double maxBytesPerSecond = 200 * 1024; // 200 KB/s throttle limit (plenty for ~70 KB/s playback)
+
+                                                    while (true)
+                                                    {
+                                                        int read = await ffmpegStream.ReadAsync(copyBuffer, 0, copyBuffer.Length);
+                                                        if (read <= 0) break;
+
+                                                        await output.WriteAsync(copyBuffer, 0, read);
+                                                        totalBytesSent += read;
+
+                                                        double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                                                        if (elapsedSeconds > 0)
+                                                        {
+                                                            double currentRate = totalBytesSent / elapsedSeconds;
+                                                            if (currentRate > maxBytesPerSecond)
+                                                            {
+                                                                double targetTime = totalBytesSent / maxBytesPerSecond;
+                                                                double sleepTimeMs = (targetTime - elapsedSeconds) * 1000.0;
+                                                                if (sleepTimeMs > 10)
+                                                                {
+                                                                    await Task.Delay((int)sleepTimeMs);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
