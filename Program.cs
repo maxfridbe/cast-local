@@ -31,6 +31,10 @@ namespace CastBlueScreen
         private static string? _sourceFilePath = null;
         private static long _sourceFileSize = 0;
         private static double _sourceDuration = 0;
+        private static string? _tempFilePath = null;
+        private static Process? _transcodeProcess = null;
+        private static double _currentSeekSeconds = 0;
+        private static SemaphoreSlim _transcodeLock = new SemaphoreSlim(1, 1);
 
         static async Task Main(string[] args)
         {
@@ -96,6 +100,50 @@ namespace CastBlueScreen
                 _sourceDuration = await GetVideoDurationAsync(_sourceFilePath);
                 Console.WriteLine($"[Info] Local file transcoding proxy mode initialized for: {_sourceFilePath}");
                 Console.WriteLine($"[Info] File Size: {_sourceFileSize} bytes, Duration: {_sourceDuration:F2} seconds");
+
+                _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
+                Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                _transcodeProcess = Process.Start(startInfo);
+
+                // Pre-buffer 15MB to prevent TV startup timeouts
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[Info] Pre-buffering transcode cache to ensure smooth TV startup. Please wait...");
+                Console.ResetColor();
+
+                long targetPrebuffer = Math.Min(15000000L, _sourceFileSize);
+                while (true)
+                {
+                    if (File.Exists(_tempFilePath))
+                    {
+                        long currentSize = new FileInfo(_tempFilePath).Length;
+                        if (currentSize >= targetPrebuffer)
+                        {
+                            break;
+                        }
+                        double progressPercent = (double)currentSize / targetPrebuffer * 100.0;
+                        Console.Write($"\r[Pre-buffer] Progress: {progressPercent:F1}% ({currentSize / 1024 / 1024}MB / {targetPrebuffer / 1024 / 1024}MB)...");
+                    }
+                    else
+                    {
+                        Console.Write("\r[Pre-buffer] Waiting for transcode stream to start...");
+                    }
+
+                    if (_transcodeProcess != null && _transcodeProcess.HasExited)
+                    {
+                        break;
+                    }
+                    await Task.Delay(250);
+                }
+                Console.WriteLine("\n[Info] Pre-buffering complete! Launching cast...");
 
                 // Auto-select first device if not specified
                 if (targetIp == null && ccIndex == null)
@@ -502,6 +550,15 @@ namespace CastBlueScreen
             }
             finally
             {
+                if (_transcodeProcess != null)
+                {
+                    try { _transcodeProcess.Kill(); } catch { }
+                }
+                if (_tempFilePath != null && File.Exists(_tempFilePath))
+                {
+                    try { File.Delete(_tempFilePath); } catch { }
+                }
+
                 Console.WriteLine("[Info] Stopping web server and disconnecting...");
                 try
                 {
@@ -699,108 +756,139 @@ namespace CastBlueScreen
                                     Console.WriteLine($"[HTTP Server] Serving full file from beginning: {totalSize} bytes (dynamic transcode)");
                                 }
 
-                                // Calculate the seek time offset in seconds
-                                double timeOffset = 0;
-                                string? seekParam = request.QueryString["seek"];
-                                if (!string.IsNullOrEmpty(seekParam) && double.TryParse(seekParam, out double querySeek))
-                                {
-                                    timeOffset = querySeek;
-                                }
-                                else if (start >= 1500000)
-                                {
-                                    if (_sourceDuration > 0 && totalSize > 0)
-                                    {
-                                        timeOffset = (double)start / totalSize * _sourceDuration;
-                                    }
-                                }
+                                 // Seek parameter checking and on-demand transcode restarting
+                                 string? seekParam = request.QueryString["seek"];
+                                 if (!string.IsNullOrEmpty(seekParam) && double.TryParse(seekParam, out double querySeek))
+                                 {
+                                     await _transcodeLock.WaitAsync();
+                                     try
+                                     {
+                                         if (Math.Abs(querySeek - _currentSeekSeconds) > 2.0)
+                                         {
+                                             Console.WriteLine($"[HTTP Server] Restarting background transcoding from seek point: {querySeek:F2} seconds...");
 
-                                Console.WriteLine($"[HTTP Server] Starting ffmpeg transcode from seek point: {timeOffset:F2} seconds...");
+                                             if (_transcodeProcess != null)
+                                             {
+                                                 try { _transcodeProcess.Kill(); } catch { }
+                                             }
 
-                                var startInfo = new ProcessStartInfo
-                                {
-                                    FileName = "ffmpeg",
-                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -f mp4 pipe:1",
-                                    RedirectStandardOutput = true,
-                                    RedirectStandardError = false, // Prevents pipeline deadlock
-                                    UseShellExecute = false,
-                                    CreateNoWindow = true
-                                };
+                                             await Task.Delay(200);
+                                             if (_tempFilePath != null && File.Exists(_tempFilePath))
+                                             {
+                                                 try { File.Delete(_tempFilePath); } catch { }
+                                             }
 
-                                using (var ffmpegProcess = Process.Start(startInfo))
-                                {
-                                    if (ffmpegProcess != null)
-                                    {
-                                        try
-                                        {
-                                            using (var output = response.OutputStream)
-                                            {
-                                                if (output != null)
-                                                {
-                                                    var ffmpegStream = ffmpegProcess.StandardOutput.BaseStream;
-                                                    // Only discard bytes for header probing (start < 1.5MB) when not explicitly seeking
-                                                    if (start > 0 && start < 1500000 && string.IsNullOrEmpty(seekParam))
-                                                    {
-                                                        byte[] discardBuffer = new byte[8192];
-                                                        long bytesToDiscard = start;
-                                                        while (bytesToDiscard > 0)
-                                                        {
-                                                            int toRead = (int)Math.Min(discardBuffer.Length, bytesToDiscard);
-                                                            int read = await ffmpegStream.ReadAsync(discardBuffer, 0, toRead);
-                                                            if (read <= 0) break;
-                                                            bytesToDiscard -= read;
-                                                        }
-                                                    }
+                                             _currentSeekSeconds = querySeek;
 
-                                                    // Throttled copy loop to prevent Wi-Fi duplex congestion
-                                                    byte[] copyBuffer = new byte[65536]; // 64KB chunks
-                                                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-                                                    long totalBytesSent = 0;
-                                                    double maxBytesPerSecond = 200 * 1024; // 200 KB/s throttle limit (plenty for ~70 KB/s playback)
+                                             var startInfo = new ProcessStartInfo
+                                             {
+                                                 FileName = "ffmpeg",
+                                                 Arguments = $"-ss {querySeek:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                                                 UseShellExecute = false,
+                                                 CreateNoWindow = true
+                                             };
 
-                                                    while (true)
-                                                    {
-                                                        int read = await ffmpegStream.ReadAsync(copyBuffer, 0, copyBuffer.Length);
-                                                        if (read <= 0) break;
+                                             _transcodeProcess = Process.Start(startInfo);
 
-                                                        await output.WriteAsync(copyBuffer, 0, read);
-                                                        totalBytesSent += read;
+                                             // Wait up to 5 seconds for at least 5MB of new stream data to buffer
+                                             long targetPrebuffer = 5000000;
+                                             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                                             while (stopwatch.ElapsedMilliseconds < 5000)
+                                             {
+                                                 if (File.Exists(_tempFilePath))
+                                                 {
+                                                     long currentSize = new FileInfo(_tempFilePath).Length;
+                                                     if (currentSize >= targetPrebuffer)
+                                                     {
+                                                         break;
+                                                     }
+                                                 }
+                                                 if (_transcodeProcess != null && _transcodeProcess.HasExited)
+                                                 {
+                                                     break;
+                                                 }
+                                                 await Task.Delay(100);
+                                             }
+                                             Console.WriteLine($"[HTTP Server] Pre-buffering for seek complete.");
+                                         }
+                                     }
+                                     finally
+                                     {
+                                         _transcodeLock.Release();
+                                     }
+                                 }
 
-                                                        // Only throttle after sending the initial startup buffer (8MB) to ensure instant play
-                                                        if (totalBytesSent > 8000000)
-                                                        {
-                                                            double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
-                                                            if (elapsedSeconds > 0)
-                                                            {
-                                                                double currentRate = totalBytesSent / elapsedSeconds;
-                                                                if (currentRate > maxBytesPerSecond)
-                                                                {
-                                                                    double targetTime = totalBytesSent / maxBytesPerSecond;
-                                                                    double sleepTimeMs = (targetTime - elapsedSeconds) * 1000.0;
-                                                                    if (sleepTimeMs > 10)
-                                                                    {
-                                                                        await Task.Delay((int)sleepTimeMs);
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Console.WriteLine($"[HTTP Server] Dynamic transcode streaming interrupted: {ex.Message}");
-                                        }
-                                        finally
-                                        {
-                                            try
-                                            {
-                                                ffmpegProcess.Kill();
-                                            }
-                                            catch { }
-                                        }
-                                    }
-                                }
+                                 // Read and serve from the local growing transcode file
+                                 if (_tempFilePath != null && File.Exists(_tempFilePath))
+                                 {
+                                     try
+                                     {
+                                         using (var output = response.OutputStream)
+                                         {
+                                             if (output != null)
+                                             {
+                                                 using (var fs = new FileStream(_tempFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                                                 {
+                                                     fs.Seek(start, SeekOrigin.Begin);
+                                                     byte[] buffer = new byte[65536];
+                                                     long bytesRemaining = (end - start + 1);
+
+                                                     var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                                                     long totalBytesSent = 0;
+                                                     double maxBytesPerSecond = 350 * 1024; // 350 KB/s throttle limit to keep Wi-Fi clear (5x playback rate)
+
+                                                     while (bytesRemaining > 0)
+                                                     {
+                                                         int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
+                                                         int read = fs.Read(buffer, 0, toRead);
+
+                                                         if (read > 0)
+                                                         {
+                                                             await output.WriteAsync(buffer, 0, read);
+                                                             bytesRemaining -= read;
+                                                             totalBytesSent += read;
+
+                                                             // Only throttle after the first 5MB of this request
+                                                             if (totalBytesSent > 5000000)
+                                                             {
+                                                                 double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                                                                 if (elapsedSeconds > 0)
+                                                                 {
+                                                                     double currentRate = totalBytesSent / elapsedSeconds;
+                                                                     if (currentRate > maxBytesPerSecond)
+                                                                     {
+                                                                         double targetTime = totalBytesSent / maxBytesPerSecond;
+                                                                         double sleepTimeMs = (targetTime - elapsedSeconds) * 1000.0;
+                                                                         if (sleepTimeMs > 10)
+                                                                         {
+                                                                             await Task.Delay((int)sleepTimeMs);
+                                                                         }
+                                                                     }
+                                                                 }
+                                                             }
+                                                         }
+                                                         else
+                                                         {
+                                                             // Reached current EOF, wait for more data from background transcoding
+                                                             if (_transcodeProcess != null && !_transcodeProcess.HasExited)
+                                                              {
+                                                                 await Task.Delay(100);
+                                                              }
+                                                             else
+                                                             {
+                                                                 break;
+                                                             }
+                                                         }
+                                                     }
+                                                 }
+                                             }
+                                         }
+                                     }
+                                     catch (Exception ex)
+                                     {
+                                         Console.WriteLine($"[HTTP Server] Local transcode stream serving interrupted: {ex.Message}");
+                                     }
+                                 }
                             }
                             else if (_pipedStream != null && mimeType.StartsWith("video/") && _liveCacher != null)
                             {
