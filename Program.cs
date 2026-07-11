@@ -765,17 +765,21 @@ namespace CastBlueScreen
                                                         await output.WriteAsync(copyBuffer, 0, read);
                                                         totalBytesSent += read;
 
-                                                        double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
-                                                        if (elapsedSeconds > 0)
+                                                        // Only throttle after sending the initial startup buffer (8MB) to ensure instant play
+                                                        if (totalBytesSent > 8000000)
                                                         {
-                                                            double currentRate = totalBytesSent / elapsedSeconds;
-                                                            if (currentRate > maxBytesPerSecond)
+                                                            double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                                                            if (elapsedSeconds > 0)
                                                             {
-                                                                double targetTime = totalBytesSent / maxBytesPerSecond;
-                                                                double sleepTimeMs = (targetTime - elapsedSeconds) * 1000.0;
-                                                                if (sleepTimeMs > 10)
+                                                                double currentRate = totalBytesSent / elapsedSeconds;
+                                                                if (currentRate > maxBytesPerSecond)
                                                                 {
-                                                                    await Task.Delay((int)sleepTimeMs);
+                                                                    double targetTime = totalBytesSent / maxBytesPerSecond;
+                                                                    double sleepTimeMs = (targetTime - elapsedSeconds) * 1000.0;
+                                                                    if (sleepTimeMs > 10)
+                                                                    {
+                                                                        await Task.Delay((int)sleepTimeMs);
+                                                                    }
                                                                 }
                                                             }
                                                         }
