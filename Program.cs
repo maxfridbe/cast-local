@@ -24,7 +24,7 @@ namespace CastBlueScreen
         private static Stream? _pipedStream = null;
         private static byte[]? _preReadHeader = null;
         private static int _preReadLength = 0;
-        private static bool _liveStreamServed = false;
+        private static CachedPipelineStream? _liveCacher = null;
 
         static async Task Main(string[] args)
         {
@@ -93,6 +93,7 @@ namespace CastBlueScreen
                         isVideo = true;
                         // For video, we don't buffer! We'll stream the pipe directly.
                         imageBytes = _preReadHeader; // Fallback reference so other code compiles
+                        _liveCacher = new CachedPipelineStream(_pipedStream, _preReadHeader, _preReadLength);
                         Console.WriteLine($"[Info] Detected video stream ({mimeType}) in pipeline. Streaming progressively...");
                     }
                 }
@@ -553,38 +554,52 @@ namespace CastBlueScreen
                             string mimeType = _pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes);
                             bool isLiveStream = _pipedStream != null && mimeType.StartsWith("video/");
 
-                            if (isLiveStream)
+                            if (isLiveStream && _liveCacher != null)
                             {
-                                if (_liveStreamServed)
-                                {
-                                    Console.WriteLine("[HTTP Server] Warning: Live stream request received but stream has already been consumed.");
-                                    response.StatusCode = (int)HttpStatusCode.Gone;
-                                    response.Close();
-                                    continue;
-                                }
-                                _liveStreamServed = true;
-
                                 response.ContentType = mimeType;
                                 response.AddHeader("Access-Control-Allow-Origin", "*");
-                                response.StatusCode = (int)HttpStatusCode.OK;
+                                response.AddHeader("Accept-Ranges", "bytes");
 
-                                Console.WriteLine("[HTTP Server] Streaming video pipeline directly to the TV (live mode)...");
+                                long start = 0;
+                                bool isPartial = false;
 
-                                using (var output = response.OutputStream)
+                                string? rangeHeader = request.Headers["Range"];
+                                if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
                                 {
-                                    if (output != null)
+                                    var parts = rangeHeader.Substring(6).Split('-');
+                                    if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
                                     {
-                                        // 1. Write the pre-read header bytes first
-                                        if (_preReadHeader != null && _preReadLength > 0)
-                                        {
-                                            await output.WriteAsync(_preReadHeader, 0, _preReadLength);
-                                        }
-
-                                        // 2. Stream the rest of the stdin directly to the TV
-                                        await _pipedStream!.CopyToAsync(output);
+                                        start = parsedStart;
+                                        isPartial = true;
                                     }
                                 }
-                                Console.WriteLine("[HTTP Server] Live stream copying finished.");
+
+                                if (isPartial)
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.PartialContent;
+                                    response.AddHeader("Content-Range", $"bytes {start}-/*");
+                                    Console.WriteLine($"[HTTP Server] Streaming video starting from range offset: {start} (live mode)...");
+                                }
+                                else
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.OK;
+                                    Console.WriteLine("[HTTP Server] Streaming video from beginning (live mode)...");
+                                }
+
+                                try
+                                {
+                                    using (var output = response.OutputStream)
+                                    {
+                                        if (output != null)
+                                        {
+                                            await _liveCacher.CopyToAsync(output, start);
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[HTTP Server] Live stream connection interrupted: {ex.Message}");
+                                }
                             }
                             else
                             {
@@ -684,6 +699,79 @@ namespace CastBlueScreen
                 return "video/webm";
             }
             return "video/mp4"; // default fallback for piped video streams
+        }
+    }
+
+    class CachedPipelineStream
+    {
+        private readonly Stream _underlying;
+        private readonly MemoryStream _cache = new MemoryStream();
+        private readonly object _lock = new object();
+        private bool _isUnderlyingExhausted = false;
+
+        public CachedPipelineStream(Stream underlying, byte[] initialHeader, int initialLength)
+        {
+            _underlying = underlying;
+            if (initialLength > 0)
+            {
+                _cache.Write(initialHeader, 0, initialLength);
+            }
+        }
+
+        public async Task CopyToAsync(Stream destination, long startOffset)
+        {
+            long currentOffset = startOffset;
+            byte[] buffer = new byte[81920]; // 80KB buffer
+
+            while (true)
+            {
+                byte[]? chunkToCopy = null;
+                int chunkLen = 0;
+
+                lock (_lock)
+                {
+                    if (currentOffset < _cache.Length)
+                    {
+                        // Serve from cache
+                        int available = (int)(_cache.Length - currentOffset);
+                        chunkLen = Math.Min(buffer.Length, available);
+                        _cache.Position = currentOffset;
+                        _cache.Read(buffer, 0, chunkLen);
+
+                        chunkToCopy = buffer;
+                    }
+                }
+
+                if (chunkToCopy != null)
+                {
+                    await destination.WriteAsync(chunkToCopy, 0, chunkLen);
+                    currentOffset += chunkLen;
+                    continue;
+                }
+
+                // If cache is exhausted but underlying stream is also exhausted, we are done!
+                lock (_lock)
+                {
+                    if (_isUnderlyingExhausted) break;
+                }
+
+                // Otherwise, read new bytes from the underlying stream
+                int read = await _underlying.ReadAsync(buffer, 0, buffer.Length);
+                if (read <= 0)
+                {
+                    lock (_lock)
+                    {
+                        _isUnderlyingExhausted = true;
+                    }
+                    break;
+                }
+
+                lock (_lock)
+                {
+                    _cache.Position = _cache.Length;
+                    _cache.Write(buffer, 0, read);
+                }
+            }
         }
     }
 }
