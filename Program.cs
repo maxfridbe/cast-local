@@ -35,6 +35,7 @@ namespace CastBlueScreen
         private static Process? _transcodeProcess = null;
         private static double _currentSeekSeconds = 0;
         private static SemaphoreSlim _transcodeLock = new SemaphoreSlim(1, 1);
+        private static bool _isLiveMode = false;
 
         static async Task Main(string[] args)
         {
@@ -87,6 +88,7 @@ namespace CastBlueScreen
             }
 
             _contentSize = contentSize;
+            _isLiveMode = isLiveFlag;
 
             byte[] imageBytes = BluePngBytes;
             bool isPiped = Console.IsInputRedirected || isLiveFlag;
@@ -412,15 +414,25 @@ namespace CastBlueScreen
                 StreamType streamType = StreamType.None;
                 if (isVideo)
                 {
-                    streamType = (_sourceFilePath != null) ? StreamType.Buffered : StreamType.Live;
+                    streamType = (_sourceFilePath != null && !_isLiveMode) ? StreamType.Buffered : StreamType.Live;
                 }
 
-                var mediaStatus = await mediaChannel.LoadAsync(new MediaInformation
+                MediaStatus? mediaStatus = null;
+                try
                 {
-                    ContentId = imageUri,
-                    ContentType = mimeType,
-                    StreamType = streamType
-                });
+                    mediaStatus = await mediaChannel.LoadAsync(new MediaInformation
+                    {
+                        ContentId = imageUri,
+                        ContentType = mimeType,
+                        StreamType = streamType
+                    });
+                }
+                catch (TimeoutException)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[Warning] Cast load request timed out, but TV is still loading the stream. Continuing...");
+                    Console.ResetColor();
+                }
 
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("\n========================================================");

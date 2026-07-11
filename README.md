@@ -42,12 +42,17 @@ graph TD
 Pass a local video file (MKV, MP4, AVI, WebM) directly to the command. The tool will spawn `ffmpeg` in the background to transcode the video stream to a temporary MP4 file in real-time, allowing **full seeking capabilities** using your TV remote, phone, or Google Home app:
 
 ```bash
-# Using dotnet run
-dotnet run -- "/var/home/maxfridbe/Videos/MaxFlix/Tri.kota.Zimnie.kanikuly.1080p-EniaHD.mkv"
-
-# Using the compiled single binary
+# Standard Buffered Mode (reports content size, probes headers)
 ./bin/Release/net10.0/linux-x64/publish/cast-local "/var/home/maxfridbe/Videos/MaxFlix/Tri.kota.Zimnie.kanikuly.1080p-EniaHD.mkv"
+
+# Live Transcoding Mode (VLC-style, streams as an infinite live source)
+# Highly recommended for slower network connections / CIFS mounts
+./bin/Release/net10.0/linux-x64/publish/cast-local --live "/var/home/maxfridbe/Videos/MaxFlix/Tri.kota.Zimnie.kanikuly.1080p-EniaHD.mkv"
 ```
+
+Options for local file casting:
+* `--live`: Forces the TV to treat the video as an infinite progressive live stream. This prevents the TV from seeking to the end of the file to parse headers (which can trigger slow network timeouts on Wi-Fi). Instead, remote seeks are intercepted by the status poller, which automatically restarts the backend transcoder from the seek point.
+* `--size <bytes>`: Specify the estimated total size of the video stream in bytes (e.g., `--size 282000000` for 282MB) so that the TV can make standard range requests without chunked-encoding limitations.
 
 ### 2. Piped Progressive Live Mode
 Pipe any PNG, JPG/JPEG, GIF, MP4, or WebM media file directly into the command. The tool will auto-detect the file type based on its magic bytes, start the HTTP server, and automatically cast to the TV (defaulting to `--cc 1`):
