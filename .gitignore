@@ -1,0 +1,13 @@
+# Build directories
+[Bb]in/
+[Oo]bj/
+
+# User-specific files
+*.user
+*.userosscache
+*.sln.docstates
+
+# IDE files
+.vs/
+.idea/
+.vscode/
