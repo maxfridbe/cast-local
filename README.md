@@ -55,6 +55,10 @@ cat nature_wallpaper.jpg | dotnet run
 curl -sL "https://samplelib.com/preview/mp4/sample-5s.mp4" | dotnet run
 ```
 
+Options for live video streaming:
+- `--live`: Force the utility to treat the input as a progressive live stream.
+- `--size <bytes>`: Specify the estimated total size of the video stream in bytes (e.g., `--size 282000000` for 282MB) to let the TV fetch range requests accurately without chunked-encoding limitations.
+
 ### 3. Selector Mode (`--cc`)
 Select a specific discovered device by its index when multiple options are present:
 ```bash
