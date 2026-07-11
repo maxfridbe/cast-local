@@ -66,3 +66,18 @@ Manually specify the TV's IP address to bypass discovery completely:
 ```bash
 dotnet run -- 192.168.50.109
 ```
+
+---
+
+## 📦 Compiling to Standalone Single Binary (No dotnet deps)
+
+The project is pre-configured to build a **self-contained, single-file native executable** for Linux x64 that has zero external `.NET` dependencies. JIT, standard library, and all dependencies are bundled into the binary.
+
+To compile:
+```bash
+dotnet publish -c Release
+```
+
+The output binary will be generated at:
+[cast-local](file:///var/home/maxfridbe/Dev/vibecoding/cast-local/bin/Release/net10.0/linux-x64/publish/cast-local) (approx. 19 MB).
+
