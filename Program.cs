@@ -26,7 +26,7 @@ namespace CastBlueScreen
             Console.Clear();
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("========================================");
-            Console.WriteLine("   Antigravity Smart TV Cast Utility    ");
+            Console.WriteLine("        Smart TV Cast Utility           ");
             Console.WriteLine("========================================");
             Console.ResetColor();
 
