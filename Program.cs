@@ -25,6 +25,7 @@ namespace CastBlueScreen
         private static byte[]? _preReadHeader = null;
         private static int _preReadLength = 0;
         private static CachedPipelineStream? _liveCacher = null;
+        private static long? _contentSize = null;
 
         static async Task Main(string[] args)
         {
@@ -37,6 +38,7 @@ namespace CastBlueScreen
 
             string? targetIp = null;
             int? ccIndex = null;
+            long? contentSize = null;
 
             // Parse arguments
             for (int i = 0; i < args.Length; i++)
@@ -49,11 +51,21 @@ namespace CastBlueScreen
                     }
                     i++; // skip next arg
                 }
+                else if (args[i] == "--size" && i + 1 < args.Length)
+                {
+                    if (long.TryParse(args[i + 1], out long sz))
+                    {
+                        contentSize = sz;
+                    }
+                    i++;
+                }
                 else if (IPAddress.TryParse(args[i], out _))
                 {
                     targetIp = args[i];
                 }
             }
+
+            _contentSize = contentSize;
 
             byte[] imageBytes = BluePngBytes;
             bool isPiped = Console.IsInputRedirected;
@@ -556,11 +568,14 @@ namespace CastBlueScreen
 
                             if (isLiveStream && _liveCacher != null)
                             {
+                                long totalSize = _contentSize ?? 1000000000L; // Default to 1 GB if not specified
+
                                 response.ContentType = mimeType;
                                 response.AddHeader("Access-Control-Allow-Origin", "*");
                                 response.AddHeader("Accept-Ranges", "bytes");
 
                                 long start = 0;
+                                long end = totalSize - 1;
                                 bool isPartial = false;
 
                                 string? rangeHeader = request.Headers["Range"];
@@ -572,18 +587,29 @@ namespace CastBlueScreen
                                         start = parsedStart;
                                         isPartial = true;
                                     }
+                                    if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
+                                    {
+                                        end = parsedEnd;
+                                    }
                                 }
+
+                                // Safety bounds checks
+                                if (start < 0) start = 0;
+                                if (end >= totalSize) end = totalSize - 1;
+                                if (start > end) start = end;
 
                                 if (isPartial)
                                 {
                                     response.StatusCode = (int)HttpStatusCode.PartialContent;
-                                    response.AddHeader("Content-Range", $"bytes {start}-/*");
-                                    Console.WriteLine($"[HTTP Server] Streaming video starting from range offset: {start} (live mode)...");
+                                    response.ContentLength64 = end - start + 1;
+                                    response.AddHeader("Content-Range", $"bytes {start}-{end}/{totalSize}");
+                                    Console.WriteLine($"[HTTP Server] Streaming video starting from range offset: {start}-{end}/{totalSize} (live mode)...");
                                 }
                                 else
                                 {
                                     response.StatusCode = (int)HttpStatusCode.OK;
-                                    Console.WriteLine("[HTTP Server] Streaming video from beginning (live mode)...");
+                                    response.ContentLength64 = totalSize;
+                                    Console.WriteLine($"[HTTP Server] Streaming video from beginning: {totalSize} bytes (live mode)...");
                                 }
 
                                 try
