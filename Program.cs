@@ -347,11 +347,10 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = _sourceFilePath != null ? "video/mp2t" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
+                string mimeType = _sourceFilePath != null ? "video/mp4" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
                 string extension = mimeType switch
                 {
-                    "video/mp2t" => "ts",
                     "video/mp4" => "mp4",
                     "video/webm" => "webm",
                     "image/jpeg" => "jpg",
@@ -608,7 +607,7 @@ namespace CastBlueScreen
                         string? url = request.RawUrl;
                         if (url != null)
                         {
-                            string mimeType = _sourceFilePath != null ? "video/mp2t" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
+                            string mimeType = _sourceFilePath != null ? "video/mp4" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
                             if (_sourceFilePath != null)
                             {
@@ -667,7 +666,7 @@ namespace CastBlueScreen
                                 var startInfo = new ProcessStartInfo
                                 {
                                     FileName = "ffmpeg",
-                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -f mpegts pipe:1",
+                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -f mp4 pipe:1",
                                     RedirectStandardOutput = true,
                                     RedirectStandardError = false, // Prevents pipeline deadlock
                                     UseShellExecute = false,
