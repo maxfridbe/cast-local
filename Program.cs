@@ -21,6 +21,11 @@ namespace CastBlueScreen
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         );
 
+        private static Stream? _pipedStream = null;
+        private static byte[]? _preReadHeader = null;
+        private static int _preReadLength = 0;
+        private static bool _liveStreamServed = false;
+
         static async Task Main(string[] args)
         {
             Console.Clear();
@@ -52,29 +57,51 @@ namespace CastBlueScreen
 
             byte[] imageBytes = BluePngBytes;
             bool isPiped = Console.IsInputRedirected;
+            bool isVideo = false;
 
             if (isPiped)
             {
-                Console.WriteLine("[Info] Reading media from standard input pipeline...");
-                using (var ms = new MemoryStream())
+                Console.WriteLine("[Info] Reading stream header from standard input pipeline...");
+                _pipedStream = Console.OpenStandardInput();
+                _preReadHeader = new byte[8];
+
+                // Read up to 8 bytes to detect the MIME type
+                while (_preReadLength < _preReadHeader.Length)
                 {
-                    using (var stdin = Console.OpenStandardInput())
+                    int read = await _pipedStream.ReadAsync(_preReadHeader, _preReadLength, _preReadHeader.Length - _preReadLength);
+                    if (read <= 0) break;
+                    _preReadLength += read;
+                }
+
+                if (_preReadLength > 0)
+                {
+                    string mimeType = GetMimeType(_preReadHeader, _preReadLength);
+                    if (mimeType.StartsWith("image/"))
                     {
-                        await stdin.CopyToAsync(ms);
-                    }
-                    var inputBytes = ms.ToArray();
-                    if (inputBytes.Length > 0)
-                    {
-                        imageBytes = inputBytes;
-                        Console.WriteLine($"[Info] Read {imageBytes.Length} bytes of media data from pipeline.");
+                        isVideo = false;
+                        // For images, we buffer the whole stream in memory
+                        using (var ms = new MemoryStream())
+                        {
+                            await ms.WriteAsync(_preReadHeader, 0, _preReadLength);
+                            await _pipedStream.CopyToAsync(ms);
+                            imageBytes = ms.ToArray();
+                        }
+                        Console.WriteLine($"[Info] Read {imageBytes.Length} bytes of static image from pipeline.");
                     }
                     else
                     {
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine("[Warning] Pipeline was empty. Falling back to default blue screen.");
-                        Console.ResetColor();
-                        isPiped = false;
+                        isVideo = true;
+                        // For video, we don't buffer! We'll stream the pipe directly.
+                        imageBytes = _preReadHeader; // Fallback reference so other code compiles
+                        Console.WriteLine($"[Info] Detected video stream ({mimeType}) in pipeline. Streaming progressively...");
                     }
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[Warning] Pipeline was empty. Falling back to default blue screen.");
+                    Console.ResetColor();
+                    isPiped = false;
                 }
 
                 // If running in pipeline and no target is specified, auto-default to first discovered device
@@ -272,8 +299,7 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = GetMimeType(imageBytes);
-                bool isVideo = mimeType.StartsWith("video/");
+                string mimeType = isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes);
 
                 string extension = mimeType switch
                 {
@@ -291,7 +317,7 @@ namespace CastBlueScreen
                 {
                     ContentId = imageUri,
                     ContentType = mimeType,
-                    StreamType = isVideo ? StreamType.Buffered : StreamType.None
+                    StreamType = isVideo ? StreamType.Live : StreamType.None
                 });
 
                 Console.ForegroundColor = ConsoleColor.Green;
@@ -365,7 +391,7 @@ namespace CastBlueScreen
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("\n[Error] Casting failed!");
-                Console.WriteLine($"Details: {ex.Message}");
+                Console.WriteLine($"Details: {ex}");
                 Console.WriteLine("\nTroubleshooting tips:");
                 Console.WriteLine("1. Ensure your TV is powered on and connected to the same wireless network.");
                 Console.WriteLine("2. Check that the IP address you entered is correct.");
@@ -524,54 +550,93 @@ namespace CastBlueScreen
                         string? url = request.RawUrl;
                         if (url != null)
                         {
-                            string mimeType = GetMimeType(imageBytes);
-                            long start = 0;
-                            long end = imageBytes.Length - 1;
-                            bool isPartial = false;
+                            string mimeType = _pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes);
+                            bool isLiveStream = _pipedStream != null && mimeType.StartsWith("video/");
 
-                            string? rangeHeader = request.Headers["Range"];
-                            if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
+                            if (isLiveStream)
                             {
-                                var parts = rangeHeader.Substring(6).Split('-');
-                                if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
+                                if (_liveStreamServed)
                                 {
-                                    start = parsedStart;
-                                    isPartial = true;
+                                    Console.WriteLine("[HTTP Server] Warning: Live stream request received but stream has already been consumed.");
+                                    response.StatusCode = (int)HttpStatusCode.Gone;
+                                    response.Close();
+                                    continue;
                                 }
-                                if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
+                                _liveStreamServed = true;
+
+                                response.ContentType = mimeType;
+                                response.AddHeader("Access-Control-Allow-Origin", "*");
+                                response.StatusCode = (int)HttpStatusCode.OK;
+
+                                Console.WriteLine("[HTTP Server] Streaming video pipeline directly to the TV (live mode)...");
+
+                                using (var output = response.OutputStream)
                                 {
-                                    end = parsedEnd;
+                                    if (output != null)
+                                    {
+                                        // 1. Write the pre-read header bytes first
+                                        if (_preReadHeader != null && _preReadLength > 0)
+                                        {
+                                            await output.WriteAsync(_preReadHeader, 0, _preReadLength);
+                                        }
+
+                                        // 2. Stream the rest of the stdin directly to the TV
+                                        await _pipedStream!.CopyToAsync(output);
+                                    }
                                 }
-                            }
-
-                            // Safety checks for range bounds
-                            if (start < 0) start = 0;
-                            if (end >= imageBytes.Length) end = imageBytes.Length - 1;
-                            if (start > end) start = end;
-
-                            response.ContentType = mimeType;
-                            response.AddHeader("Access-Control-Allow-Origin", "*");
-                            response.AddHeader("Accept-Ranges", "bytes");
-
-                            if (isPartial)
-                            {
-                                response.StatusCode = (int)HttpStatusCode.PartialContent;
-                                response.ContentLength64 = end - start + 1;
-                                response.AddHeader("Content-Range", $"bytes {start}-{end}/{imageBytes.Length}");
-                                Console.WriteLine($"[HTTP Server] Serving range: bytes {start}-{end}/{imageBytes.Length} (Partial Content)");
+                                Console.WriteLine("[HTTP Server] Live stream copying finished.");
                             }
                             else
                             {
-                                response.StatusCode = (int)HttpStatusCode.OK;
-                                response.ContentLength64 = imageBytes.Length;
-                                Console.WriteLine($"[HTTP Server] Serving full file: {imageBytes.Length} bytes (OK)");
-                            }
+                                // Static content serving (images or buffered content)
+                                long start = 0;
+                                long end = imageBytes.Length - 1;
+                                bool isPartial = false;
 
-                            using (var output = response.OutputStream)
-                            {
-                                if (output != null)
+                                string? rangeHeader = request.Headers["Range"];
+                                if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
                                 {
-                                    await output.WriteAsync(imageBytes, (int)start, (int)(end - start + 1));
+                                    var parts = rangeHeader.Substring(6).Split('-');
+                                    if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
+                                    {
+                                        start = parsedStart;
+                                        isPartial = true;
+                                    }
+                                    if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
+                                    {
+                                        end = parsedEnd;
+                                    }
+                                }
+
+                                // Safety checks for range bounds
+                                if (start < 0) start = 0;
+                                if (end >= imageBytes.Length) end = imageBytes.Length - 1;
+                                if (start > end) start = end;
+
+                                response.ContentType = mimeType;
+                                response.AddHeader("Access-Control-Allow-Origin", "*");
+                                response.AddHeader("Accept-Ranges", "bytes");
+
+                                if (isPartial)
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.PartialContent;
+                                    response.ContentLength64 = end - start + 1;
+                                    response.AddHeader("Content-Range", $"bytes {start}-{end}/{imageBytes.Length}");
+                                    Console.WriteLine($"[HTTP Server] Serving range: bytes {start}-{end}/{imageBytes.Length} (Partial Content)");
+                                }
+                                else
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.OK;
+                                    response.ContentLength64 = imageBytes.Length;
+                                    Console.WriteLine($"[HTTP Server] Serving full file: {imageBytes.Length} bytes (OK)");
+                                }
+
+                                using (var output = response.OutputStream)
+                                {
+                                    if (output != null)
+                                    {
+                                        await output.WriteAsync(imageBytes, (int)start, (int)(end - start + 1));
+                                    }
                                 }
                             }
                         }
@@ -591,29 +656,34 @@ namespace CastBlueScreen
 
         static string GetMimeType(byte[] bytes)
         {
-            if (bytes.Length >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
+            return GetMimeType(bytes, bytes.Length);
+        }
+
+        static string GetMimeType(byte[] bytes, int length)
+        {
+            if (length >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
             {
                 return "image/png";
             }
-            if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
+            if (length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
             {
                 return "image/jpeg";
             }
-            if (bytes.Length >= 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38)
+            if (length >= 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38)
             {
                 return "image/gif";
             }
             // MP4 check: "ftyp" at bytes [4..7]
-            if (bytes.Length >= 8 && bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70)
+            if (length >= 8 && bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70)
             {
                 return "video/mp4";
             }
             // WebM check: starts with 1A 45 DF A3 (EBML header)
-            if (bytes.Length >= 4 && bytes[0] == 0x1A && bytes[1] == 0x45 && bytes[2] == 0xDF && bytes[3] == 0xA3)
+            if (length >= 4 && bytes[0] == 0x1A && bytes[1] == 0x45 && bytes[2] == 0xDF && bytes[3] == 0xA3)
             {
                 return "video/webm";
             }
-            return "image/png"; // default fallback
+            return "video/mp4"; // default fallback for piped video streams
         }
     }
 }
