@@ -345,11 +345,10 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = _sourceFilePath != null ? "video/mp2t" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
+                string mimeType = _sourceFilePath != null ? "video/mp4" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
                 string extension = mimeType switch
                 {
-                    "video/mp2t" => "ts",
                     "video/mp4" => "mp4",
                     "video/webm" => "webm",
                     "image/jpeg" => "jpg",
@@ -607,7 +606,7 @@ namespace CastBlueScreen
                         string? url = request.RawUrl;
                         if (url != null)
                         {
-                            string mimeType = _sourceFilePath != null ? "video/mp2t" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
+                            string mimeType = _sourceFilePath != null ? "video/mp4" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
                             if (_sourceFilePath != null)
                             {
@@ -654,9 +653,9 @@ namespace CastBlueScreen
                                     Console.WriteLine($"[HTTP Server] File transcode request from beginning: {totalSize} bytes");
                                 }
 
-                                // Calculate the seek time offset in seconds
+                                // Calculate the seek time offset in seconds (only for actual seek requests > 10MB)
                                 double timeOffset = 0;
-                                if (_sourceDuration > 0 && totalSize > 0)
+                                if (start > 10 * 1024 * 1024 && _sourceDuration > 0 && totalSize > 0)
                                 {
                                     timeOffset = (double)start / totalSize * _sourceDuration;
                                 }
@@ -666,9 +665,9 @@ namespace CastBlueScreen
                                 var startInfo = new ProcessStartInfo
                                 {
                                     FileName = "ffmpeg",
-                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -f mpegts pipe:1",
+                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -f mp4 pipe:1",
                                     RedirectStandardOutput = true,
-                                    RedirectStandardError = true,
+                                    RedirectStandardError = false, // Prevents pipeline deadlock when stderr buffer is full
                                     UseShellExecute = false,
                                     CreateNoWindow = true
                                 };
