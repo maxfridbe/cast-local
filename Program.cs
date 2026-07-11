@@ -869,7 +869,7 @@ namespace CastBlueScreen
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = "ffprobe",
-                    Arguments = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nogey=1 \"{filePath}\"",
+                    Arguments = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{filePath}\"",
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
