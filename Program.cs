@@ -397,6 +397,11 @@ namespace CastBlueScreen
                 // Poll for playback and connection status in the background
                 _ = Task.Run(async () =>
                 {
+                    double lastCurrentTime = 0;
+                    DateTime lastCheckTime = DateTime.UtcNow;
+                    string lastPlayerState = "IDLE";
+                    bool isFirstStatus = true;
+
                     while (!tcs.Task.IsCompleted)
                     {
                         await Task.Delay(1000);
@@ -410,6 +415,46 @@ namespace CastBlueScreen
                                     Console.WriteLine($"\n[Info] Video playback finished ({status.IdleReason}). Auto-exiting...");
                                     tcs.TrySetResult(true);
                                 }
+
+                                DateTime now = DateTime.UtcNow;
+                                if (status.PlayerState == "PLAYING" && !isFirstStatus && lastPlayerState == "PLAYING")
+                                {
+                                    double timeDelta = (now - lastCheckTime).TotalSeconds;
+                                    double expectedTime = lastCurrentTime + timeDelta;
+                                    double actualTime = status.CurrentTime;
+
+                                    if (Math.Abs(actualTime - expectedTime) > 5.0)
+                                    {
+                                        Console.ForegroundColor = ConsoleColor.Yellow;
+                                        Console.WriteLine($"\n[Info] Seek detected on TV: jump from {lastCurrentTime:F1}s to {actualTime:F1}s.");
+                                        Console.ResetColor();
+
+                                        string newUrl = $"http://{localIp}:{port}/media.mp4?seek={actualTime:F2}&t={now.Ticks}";
+                                        Console.WriteLine($"[Info] Reloading TV media with seeked URL: {newUrl}");
+
+                                        _ = Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await mediaChannel.LoadAsync(new MediaInformation
+                                                {
+                                                    ContentId = newUrl,
+                                                    ContentType = mimeType,
+                                                    StreamType = streamType
+                                                });
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"[Warning] Failed to reload media for seek: {ex.Message}");
+                                            }
+                                        });
+                                    }
+                                }
+
+                                lastCurrentTime = status.CurrentTime;
+                                lastCheckTime = now;
+                                lastPlayerState = status.PlayerState;
+                                isFirstStatus = false;
                             }
                         }
                         catch (Exception)
@@ -656,7 +701,12 @@ namespace CastBlueScreen
 
                                 // Calculate the seek time offset in seconds
                                 double timeOffset = 0;
-                                if (_sourceDuration > 0 && totalSize > 0)
+                                string? seekParam = request.QueryString["seek"];
+                                if (!string.IsNullOrEmpty(seekParam) && double.TryParse(seekParam, out double querySeek))
+                                {
+                                    timeOffset = querySeek;
+                                }
+                                else if (_sourceDuration > 0 && totalSize > 0)
                                 {
                                     timeOffset = (double)start / totalSize * _sourceDuration;
                                 }
@@ -683,7 +733,20 @@ namespace CastBlueScreen
                                             {
                                                 if (output != null)
                                                 {
-                                                    await ffmpegProcess.StandardOutput.BaseStream.CopyToAsync(output);
+                                                    var ffmpegStream = ffmpegProcess.StandardOutput.BaseStream;
+                                                    if (start > 0)
+                                                    {
+                                                        byte[] discardBuffer = new byte[8192];
+                                                        long bytesToDiscard = start;
+                                                        while (bytesToDiscard > 0)
+                                                        {
+                                                            int toRead = (int)Math.Min(discardBuffer.Length, bytesToDiscard);
+                                                            int read = await ffmpegStream.ReadAsync(discardBuffer, 0, toRead);
+                                                            if (read <= 0) break;
+                                                            bytesToDiscard -= read;
+                                                        }
+                                                    }
+                                                    await ffmpegStream.CopyToAsync(output);
                                                 }
                                             }
                                         }
