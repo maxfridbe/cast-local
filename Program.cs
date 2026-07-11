@@ -39,6 +39,7 @@ namespace CastBlueScreen
             string? targetIp = null;
             int? ccIndex = null;
             long? contentSize = null;
+            bool isLiveFlag = false;
 
             // Parse arguments
             for (int i = 0; i < args.Length; i++)
@@ -59,6 +60,10 @@ namespace CastBlueScreen
                     }
                     i++;
                 }
+                else if (args[i] == "--live")
+                {
+                    isLiveFlag = true;
+                }
                 else if (IPAddress.TryParse(args[i], out _))
                 {
                     targetIp = args[i];
@@ -68,7 +73,7 @@ namespace CastBlueScreen
             _contentSize = contentSize;
 
             byte[] imageBytes = BluePngBytes;
-            bool isPiped = Console.IsInputRedirected;
+            bool isPiped = Console.IsInputRedirected || isLiveFlag;
             bool isVideo = false;
 
             if (isPiped)
