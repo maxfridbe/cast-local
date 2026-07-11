@@ -706,10 +706,6 @@ namespace CastBlueScreen
                                 {
                                     timeOffset = querySeek;
                                 }
-                                else if (_sourceDuration > 0 && totalSize > 0)
-                                {
-                                    timeOffset = (double)start / totalSize * _sourceDuration;
-                                }
 
                                 Console.WriteLine($"[HTTP Server] Starting ffmpeg transcode from seek point: {timeOffset:F2} seconds...");
 
