@@ -706,6 +706,13 @@ namespace CastBlueScreen
                                 {
                                     timeOffset = querySeek;
                                 }
+                                else if (start >= 1500000)
+                                {
+                                    if (_sourceDuration > 0 && totalSize > 0)
+                                    {
+                                        timeOffset = (double)start / totalSize * _sourceDuration;
+                                    }
+                                }
 
                                 Console.WriteLine($"[HTTP Server] Starting ffmpeg transcode from seek point: {timeOffset:F2} seconds...");
 
@@ -730,7 +737,8 @@ namespace CastBlueScreen
                                                 if (output != null)
                                                 {
                                                     var ffmpegStream = ffmpegProcess.StandardOutput.BaseStream;
-                                                    if (start > 0)
+                                                    // Only discard bytes for header probing (start < 1.5MB) when not explicitly seeking
+                                                    if (start > 0 && start < 1500000 && string.IsNullOrEmpty(seekParam))
                                                     {
                                                         byte[] discardBuffer = new byte[8192];
                                                         long bytesToDiscard = start;
