@@ -113,6 +113,37 @@ namespace CastBlueScreen
 
                 _transcodeProcess = Process.Start(startInfo);
 
+                // Pre-buffer 15MB to prevent TV startup timeouts
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[Info] Pre-buffering transcode cache to ensure smooth TV startup. Please wait...");
+                Console.ResetColor();
+
+                long targetPrebuffer = Math.Min(15000000L, _sourceFileSize);
+                while (true)
+                {
+                    if (File.Exists(_tempFilePath))
+                    {
+                        long currentSize = new FileInfo(_tempFilePath).Length;
+                        if (currentSize >= targetPrebuffer)
+                        {
+                            break;
+                        }
+                        double progressPercent = (double)currentSize / targetPrebuffer * 100.0;
+                        Console.Write($"\r[Pre-buffer] Progress: {progressPercent:F1}% ({currentSize / 1024 / 1024}MB / {targetPrebuffer / 1024 / 1024}MB)...");
+                    }
+                    else
+                    {
+                        Console.Write("\r[Pre-buffer] Waiting for transcode stream to start...");
+                    }
+
+                    if (_transcodeProcess != null && _transcodeProcess.HasExited)
+                    {
+                        break;
+                    }
+                    await Task.Delay(250);
+                }
+                Console.WriteLine("\n[Info] Pre-buffering complete! Launching cast...");
+
                 // Auto-select first device if not specified
                 if (targetIp == null && ccIndex == null)
                 {
@@ -380,7 +411,7 @@ namespace CastBlueScreen
                 StreamType streamType = StreamType.None;
                 if (isVideo)
                 {
-                    streamType = (_sourceFilePath != null) ? StreamType.Buffered : StreamType.Live;
+                    streamType = StreamType.Live;
                 }
 
                 var mediaStatus = await mediaChannel.LoadAsync(new MediaInformation
