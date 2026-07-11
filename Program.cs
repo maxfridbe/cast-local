@@ -432,8 +432,7 @@ namespace CastBlueScreen
                         }
                         catch (Exception)
                         {
-                            Console.WriteLine("\n[Info] Connection to the TV lost or playback stopped. Auto-exiting...");
-                            tcs.TrySetResult(true);
+                            // Cast control channel disconnected or went idle. Keep HTTP server running.
                         }
                     }
                 });
