@@ -267,7 +267,7 @@ namespace CastBlueScreen
                 };
 
                 await sender.ConnectAsync(receiver);
-                Console.WriteLine("[Info] Launching default media receiver on the TV...");
+                Console.WriteLine("[Info] Launching default media receiver on the TV... ");
                 
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
@@ -308,23 +308,57 @@ namespace CastBlueScreen
                 Console.WriteLine("========================================================");
                 Console.ResetColor();
 
+                var tcs = new TaskCompletionSource<bool>();
+
+                // Poll for playback and connection status in the background
+                _ = Task.Run(async () =>
+                {
+                    while (!tcs.Task.IsCompleted)
+                    {
+                        await Task.Delay(1000);
+                        try
+                        {
+                            var status = await mediaChannel.GetStatusAsync();
+                            if (status != null)
+                            {
+                                if (isVideo && status.PlayerState == "IDLE" && (status.IdleReason == "FINISHED" || status.IdleReason == "ERROR"))
+                                {
+                                    Console.WriteLine($"\n[Info] Video playback finished ({status.IdleReason}). Auto-exiting...");
+                                    tcs.TrySetResult(true);
+                                }
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            Console.WriteLine("\n[Info] Connection to the TV lost or playback stopped. Auto-exiting...");
+                            tcs.TrySetResult(true);
+                        }
+                    }
+                });
+
+                // Set up Ctrl+C listener
+                Console.CancelKeyPress += (s, e) =>
+                {
+                    e.Cancel = true;
+                    tcs.TrySetResult(true);
+                };
+
                 if (isPiped)
                 {
                     Console.WriteLine(isVideo 
                         ? "Casting piped video. Keep this process running to stream. Press [Ctrl+C] to stop and exit..." 
                         : "Casting piped image. Press [Ctrl+C] to stop casting and exit...");
-                    var tcs = new TaskCompletionSource<bool>();
-                    Console.CancelKeyPress += (s, e) =>
-                    {
-                        e.Cancel = true;
-                        tcs.SetResult(true);
-                    };
                     await tcs.Task;
                 }
                 else
                 {
-                    Console.WriteLine("Press [Enter] or [Ctrl+C] to stop casting and shut down...");
-                    Console.ReadLine();
+                    Console.WriteLine("Casting. Press [Enter] or [Ctrl+C] to stop casting and exit...");
+                    var readLineTask = Task.Run(() => Console.ReadLine());
+                    var completedTask = await Task.WhenAny(tcs.Task, readLineTask);
+                    if (completedTask == tcs.Task)
+                    {
+                        // Woken by background task status (playback finished or TV disconnected)
+                    }
                 }
             }
             catch (Exception ex)
