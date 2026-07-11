@@ -100,6 +100,19 @@ namespace CastBlueScreen
                 Console.WriteLine($"[Info] Local file transcoding proxy mode initialized for: {_sourceFilePath}");
                 Console.WriteLine($"[Info] File Size: {_sourceFileSize} bytes, Duration: {_sourceDuration:F2} seconds");
 
+                _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
+                Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                _transcodeProcess = Process.Start(startInfo);
+
                 // Auto-select first device if not specified
                 if (targetIp == null && ccIndex == null)
                 {
@@ -327,22 +340,7 @@ namespace CastBlueScreen
                 return;
             }
 
-            // Start dynamic background transcoding if casting a local video file
-            if (_sourceFilePath != null)
-            {
-                _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
-                Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
 
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = "ffmpeg",
-                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                _transcodeProcess = Process.Start(startInfo);
-            }
 
             // Run the HTTP server request processing in the background
             _ = Task.Run(() => RunHttpServerAsync(listener, imageBytes));
