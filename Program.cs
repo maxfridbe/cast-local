@@ -106,7 +106,7 @@ namespace CastBlueScreen
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = "ffmpeg",
-                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
