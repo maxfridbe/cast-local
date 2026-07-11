@@ -728,24 +728,30 @@ namespace CastBlueScreen
                                 long totalSize = _sourceFileSize;
                                 response.ContentType = mimeType;
                                 response.AddHeader("Access-Control-Allow-Origin", "*");
-                                response.AddHeader("Accept-Ranges", "bytes");
+                                if (!_isLiveMode)
+                                {
+                                    response.AddHeader("Accept-Ranges", "bytes");
+                                }
 
                                 long start = 0;
                                 long end = totalSize - 1;
                                 bool isPartial = false;
 
-                                string? rangeHeader = request.Headers["Range"];
-                                if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
+                                if (!_isLiveMode)
                                 {
-                                    var parts = rangeHeader.Substring(6).Split('-');
-                                    if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
+                                    string? rangeHeader = request.Headers["Range"];
+                                    if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
                                     {
-                                        start = parsedStart;
-                                        isPartial = true;
-                                    }
-                                    if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
-                                    {
-                                        end = parsedEnd;
+                                        var parts = rangeHeader.Substring(6).Split('-');
+                                        if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
+                                        {
+                                            start = parsedStart;
+                                            isPartial = true;
+                                        }
+                                        if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
+                                        {
+                                            end = parsedEnd;
+                                        }
                                     }
                                 }
 
@@ -754,7 +760,7 @@ namespace CastBlueScreen
                                 if (end >= totalSize) end = totalSize - 1;
                                 if (start > end) start = end;
 
-                                if (isPartial)
+                                if (isPartial && !_isLiveMode)
                                 {
                                     response.StatusCode = (int)HttpStatusCode.PartialContent;
                                     response.ContentLength64 = end - start + 1;
@@ -764,8 +770,11 @@ namespace CastBlueScreen
                                 else
                                 {
                                     response.StatusCode = (int)HttpStatusCode.OK;
-                                    response.ContentLength64 = totalSize;
-                                    Console.WriteLine($"[HTTP Server] Serving full file from beginning: {totalSize} bytes (dynamic transcode)");
+                                    if (!_isLiveMode)
+                                    {
+                                        response.ContentLength64 = totalSize;
+                                    }
+                                    Console.WriteLine(_isLiveMode ? "[HTTP Server] Serving live stream (progressive transcode)" : $"[HTTP Server] Serving full file from beginning: {totalSize} bytes (dynamic transcode)");
                                 }
 
                                  // Seek parameter checking and on-demand transcode restarting
