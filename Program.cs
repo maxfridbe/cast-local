@@ -34,6 +34,7 @@ namespace CastBlueScreen
 
         private static string? _tempFilePath = null;
         private static Process? _transcodeProcess = null;
+        private static string? _cachedSourcePath = null;
 
         static async Task Main(string[] args)
         {
@@ -99,6 +100,41 @@ namespace CastBlueScreen
                 _sourceDuration = await GetVideoDurationAsync(_sourceFilePath);
                 Console.WriteLine($"[Info] Local file transcoding proxy mode initialized for: {_sourceFilePath}");
                 Console.WriteLine($"[Info] File Size: {_sourceFileSize} bytes, Duration: {_sourceDuration:F2} seconds");
+
+                // Copy to local SSD cache if it's on a slow network share to ensure absolute stability
+                string localCachedSource = _sourceFilePath;
+                if (!_sourceFilePath.StartsWith(Path.GetTempPath()))
+                {
+                    localCachedSource = Path.Combine(Path.GetTempPath(), "cast_source_" + Guid.NewGuid().ToString() + Path.GetExtension(_sourceFilePath));
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[Info] Copying network file to local SSD cache for smooth playback: {Path.GetFileName(_sourceFilePath)}");
+                    Console.ResetColor();
+
+                    try
+                    {
+                        using (var sourceStream = new FileStream(_sourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        using (var destStream = new FileStream(localCachedSource, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            byte[] buffer = new byte[1024 * 1024]; // 1MB buffer
+                            long totalBytesRead = 0;
+                            int read;
+                            while ((read = await sourceStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                            {
+                                await destStream.WriteAsync(buffer, 0, read);
+                                totalBytesRead += read;
+                                double pct = (double)totalBytesRead / _sourceFileSize * 100.0;
+                                Console.Write($"\r[Cache Copy] Progress: {pct:F1}% ({totalBytesRead / 1024 / 1024}MB / {_sourceFileSize / 1024 / 1024}MB)...");
+                            }
+                        }
+                        Console.WriteLine("\n[Info] Copy complete! Switching source path to local cache.");
+                        _sourceFilePath = localCachedSource;
+                        _cachedSourcePath = localCachedSource;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"\n[Warning] Failed to copy to local cache: {ex.Message}. Streaming directly from source.");
+                    }
+                }
 
                 _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
                 Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
@@ -512,6 +548,10 @@ namespace CastBlueScreen
                 if (_tempFilePath != null && File.Exists(_tempFilePath))
                 {
                     try { File.Delete(_tempFilePath); } catch { }
+                }
+                if (_cachedSourcePath != null && File.Exists(_cachedSourcePath))
+                {
+                    try { File.Delete(_cachedSourcePath); } catch { }
                 }
 
                 Console.WriteLine("[Info] Stopping web server and disconnecting...");
