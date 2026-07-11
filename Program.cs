@@ -32,6 +32,9 @@ namespace CastBlueScreen
         private static long _sourceFileSize = 0;
         private static double _sourceDuration = 0;
 
+        private static string? _tempFilePath = null;
+        private static Process? _transcodeProcess = null;
+
         static async Task Main(string[] args)
         {
             Console.Clear();
@@ -324,6 +327,23 @@ namespace CastBlueScreen
                 return;
             }
 
+            // Start dynamic background transcoding if casting a local video file
+            if (_sourceFilePath != null)
+            {
+                _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
+                Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "ffmpeg",
+                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                _transcodeProcess = Process.Start(startInfo);
+            }
+
             // Run the HTTP server request processing in the background
             _ = Task.Run(() => RunHttpServerAsync(listener, imageBytes));
 
@@ -456,6 +476,16 @@ namespace CastBlueScreen
             }
             finally
             {
+                // Cleanup background transcode process and temp files
+                if (_transcodeProcess != null)
+                {
+                    try { _transcodeProcess.Kill(); } catch { }
+                }
+                if (_tempFilePath != null && File.Exists(_tempFilePath))
+                {
+                    try { File.Delete(_tempFilePath); } catch { }
+                }
+
                 Console.WriteLine("[Info] Stopping web server and disconnecting...");
                 try
                 {
@@ -608,7 +638,7 @@ namespace CastBlueScreen
                         {
                             string mimeType = _sourceFilePath != null ? "video/mp4" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
-                            if (_sourceFilePath != null)
+                            if (_sourceFilePath != null && _tempFilePath != null)
                             {
                                 long totalSize = _sourceFileSize;
                                 response.ContentType = mimeType;
@@ -644,61 +674,55 @@ namespace CastBlueScreen
                                     response.StatusCode = (int)HttpStatusCode.PartialContent;
                                     response.ContentLength64 = end - start + 1;
                                     response.AddHeader("Content-Range", $"bytes {start}-{end}/{totalSize}");
-                                    Console.WriteLine($"[HTTP Server] File transcode request for range: bytes {start}-{end}/{totalSize}");
+                                    Console.WriteLine($"[HTTP Server] Serving range: bytes {start}-{end}/{totalSize} (growing file)");
                                 }
                                 else
                                 {
                                     response.StatusCode = (int)HttpStatusCode.OK;
                                     response.ContentLength64 = totalSize;
-                                    Console.WriteLine($"[HTTP Server] File transcode request from beginning: {totalSize} bytes");
+                                    Console.WriteLine($"[HTTP Server] Serving full file from beginning: {totalSize} bytes (growing file)");
                                 }
 
-                                // Calculate the seek time offset in seconds (only for actual seek requests > 10MB)
-                                double timeOffset = 0;
-                                if (start > 10 * 1024 * 1024 && _sourceDuration > 0 && totalSize > 0)
+                                try
                                 {
-                                    timeOffset = (double)start / totalSize * _sourceDuration;
-                                }
-
-                                Console.WriteLine($"[HTTP Server] Starting ffmpeg transcode from seek point: {timeOffset:F2} seconds...");
-
-                                var startInfo = new ProcessStartInfo
-                                {
-                                    FileName = "ffmpeg",
-                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -f mp4 pipe:1",
-                                    RedirectStandardOutput = true,
-                                    RedirectStandardError = false, // Prevents pipeline deadlock when stderr buffer is full
-                                    UseShellExecute = false,
-                                    CreateNoWindow = true
-                                };
-
-                                using (var ffmpegProcess = Process.Start(startInfo))
-                                {
-                                    if (ffmpegProcess != null)
+                                    using (var fs = new FileStream(_tempFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                                    using (var output = response.OutputStream)
                                     {
-                                        try
+                                        if (output != null)
                                         {
-                                            using (var output = response.OutputStream)
+                                            fs.Position = start;
+                                            long bytesToRead = end - start + 1;
+                                            byte[] buffer = new byte[81920]; // 80KB chunks
+
+                                            while (bytesToRead > 0)
                                             {
-                                                if (output != null)
+                                                int read = await fs.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, bytesToRead));
+                                                if (read > 0)
                                                 {
-                                                    await ffmpegProcess.StandardOutput.BaseStream.CopyToAsync(output);
+                                                    await output.WriteAsync(buffer, 0, read);
+                                                    bytesToRead -= read;
+                                                }
+                                                else
+                                                {
+                                                    // Reached current EOF on disk. Check if transcoding is still running.
+                                                    bool isRunning = _transcodeProcess != null && !_transcodeProcess.HasExited;
+                                                    if (isRunning)
+                                                    {
+                                                        await Task.Delay(100); // Wait for more data to be written
+                                                    }
+                                                    else
+                                                    {
+                                                        // Transcoding finished and we hit absolute EOF
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
-                                        catch (Exception ex)
-                                        {
-                                            Console.WriteLine($"[HTTP Server] File transcode streaming interrupted: {ex.Message}");
-                                        }
-                                        finally
-                                        {
-                                            try
-                                            {
-                                                ffmpegProcess.Kill();
-                                            }
-                                            catch { }
-                                        }
                                     }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[HTTP Server] Dynamic file streaming interrupted: {ex.Message}");
                                 }
                             }
                             else if (_pipedStream != null && mimeType.StartsWith("video/") && _liveCacher != null)
