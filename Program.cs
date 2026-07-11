@@ -11,6 +11,7 @@ using System.Net.NetworkInformation;
 using GoogleCast;
 using GoogleCast.Channels;
 using GoogleCast.Models.Media;
+using System.Diagnostics;
 
 namespace CastBlueScreen
 {
@@ -26,6 +27,10 @@ namespace CastBlueScreen
         private static int _preReadLength = 0;
         private static CachedPipelineStream? _liveCacher = null;
         private static long? _contentSize = null;
+
+        private static string? _sourceFilePath = null;
+        private static long _sourceFileSize = 0;
+        private static double _sourceDuration = 0;
 
         static async Task Main(string[] args)
         {
@@ -68,6 +73,13 @@ namespace CastBlueScreen
                 {
                     targetIp = args[i];
                 }
+                else
+                {
+                    if (File.Exists(args[i]))
+                    {
+                        _sourceFilePath = Path.GetFullPath(args[i]);
+                    }
+                }
             }
 
             _contentSize = contentSize;
@@ -76,7 +88,23 @@ namespace CastBlueScreen
             bool isPiped = Console.IsInputRedirected || isLiveFlag;
             bool isVideo = false;
 
-            if (isPiped)
+            if (_sourceFilePath != null)
+            {
+                isVideo = true;
+                isPiped = false;
+                _sourceFileSize = new FileInfo(_sourceFilePath).Length;
+                _sourceDuration = await GetVideoDurationAsync(_sourceFilePath);
+                Console.WriteLine($"[Info] Local file transcoding proxy mode initialized for: {_sourceFilePath}");
+                Console.WriteLine($"[Info] File Size: {_sourceFileSize} bytes, Duration: {_sourceDuration:F2} seconds");
+
+                // Auto-select first device if not specified
+                if (targetIp == null && ccIndex == null)
+                {
+                    ccIndex = 1;
+                    Console.WriteLine("[Info] Local file mode: Auto-selecting first discovered device (--cc 1).");
+                }
+            }
+            else if (isPiped)
             {
                 Console.WriteLine("[Info] Reading stream header from standard input pipeline...");
                 _pipedStream = Console.OpenStandardInput();
@@ -317,7 +345,7 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes);
+                string mimeType = _sourceFilePath != null ? "video/mp4" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
                 string extension = mimeType switch
                 {
@@ -331,17 +359,27 @@ namespace CastBlueScreen
                 string imageUri = $"http://{localIp}:{port}/media.{extension}?t={DateTime.UtcNow.Ticks}";
                 Console.WriteLine($"[Info] Casting media URL: {imageUri} (MIME: {mimeType})");
 
+                StreamType streamType = StreamType.None;
+                if (isVideo)
+                {
+                    streamType = (_sourceFilePath != null) ? StreamType.Buffered : StreamType.Live;
+                }
+
                 var mediaStatus = await mediaChannel.LoadAsync(new MediaInformation
                 {
                     ContentId = imageUri,
                     ContentType = mimeType,
-                    StreamType = isVideo ? StreamType.Live : StreamType.None
+                    StreamType = streamType
                 });
 
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("\n========================================================");
                 Console.WriteLine(" [Success] Cast request sent successfully!");
-                if (isPiped)
+                if (_sourceFilePath != null)
+                {
+                    Console.WriteLine($" The TV should now play local video: {Path.GetFileName(_sourceFilePath)}");
+                }
+                else if (isPiped)
                 {
                     Console.WriteLine(isVideo ? " The TV should now play your piped video." : " The TV should now display your piped image.");
                 }
@@ -568,10 +606,102 @@ namespace CastBlueScreen
                         string? url = request.RawUrl;
                         if (url != null)
                         {
-                            string mimeType = _pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes);
-                            bool isLiveStream = _pipedStream != null && mimeType.StartsWith("video/");
+                            string mimeType = _sourceFilePath != null ? "video/mp4" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
-                            if (isLiveStream && _liveCacher != null)
+                            if (_sourceFilePath != null)
+                            {
+                                long totalSize = _sourceFileSize;
+                                response.ContentType = mimeType;
+                                response.AddHeader("Access-Control-Allow-Origin", "*");
+                                response.AddHeader("Accept-Ranges", "bytes");
+
+                                long start = 0;
+                                long end = totalSize - 1;
+                                bool isPartial = false;
+
+                                string? rangeHeader = request.Headers["Range"];
+                                if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
+                                {
+                                    var parts = rangeHeader.Substring(6).Split('-');
+                                    if (parts.Length > 0 && long.TryParse(parts[0], out long parsedStart))
+                                    {
+                                        start = parsedStart;
+                                        isPartial = true;
+                                    }
+                                    if (parts.Length > 1 && !string.IsNullOrEmpty(parts[1]) && long.TryParse(parts[1], out long parsedEnd))
+                                    {
+                                        end = parsedEnd;
+                                    }
+                                }
+
+                                // Safety bounds checks
+                                if (start < 0) start = 0;
+                                if (end >= totalSize) end = totalSize - 1;
+                                if (start > end) start = end;
+
+                                if (isPartial)
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.PartialContent;
+                                    response.ContentLength64 = end - start + 1;
+                                    response.AddHeader("Content-Range", $"bytes {start}-{end}/{totalSize}");
+                                    Console.WriteLine($"[HTTP Server] File transcode request for range: bytes {start}-{end}/{totalSize}");
+                                }
+                                else
+                                {
+                                    response.StatusCode = (int)HttpStatusCode.OK;
+                                    response.ContentLength64 = totalSize;
+                                    Console.WriteLine($"[HTTP Server] File transcode request from beginning: {totalSize} bytes");
+                                }
+
+                                // Calculate the seek time offset in seconds
+                                double timeOffset = 0;
+                                if (_sourceDuration > 0 && totalSize > 0)
+                                {
+                                    timeOffset = (double)start / totalSize * _sourceDuration;
+                                }
+
+                                Console.WriteLine($"[HTTP Server] Starting ffmpeg transcode from seek point: {timeOffset:F2} seconds...");
+
+                                var startInfo = new ProcessStartInfo
+                                {
+                                    FileName = "ffmpeg",
+                                    Arguments = $"-ss {timeOffset:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -movflags frag_keyframe+empty_moov -f mp4 pipe:1",
+                                    RedirectStandardOutput = true,
+                                    RedirectStandardError = true,
+                                    UseShellExecute = false,
+                                    CreateNoWindow = true
+                                };
+
+                                using (var ffmpegProcess = Process.Start(startInfo))
+                                {
+                                    if (ffmpegProcess != null)
+                                    {
+                                        try
+                                        {
+                                            using (var output = response.OutputStream)
+                                            {
+                                                if (output != null)
+                                                {
+                                                    await ffmpegProcess.StandardOutput.BaseStream.CopyToAsync(output);
+                                                }
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[HTTP Server] File transcode streaming interrupted: {ex.Message}");
+                                        }
+                                        finally
+                                        {
+                                            try
+                                            {
+                                                ffmpegProcess.Kill();
+                                            }
+                                            catch { }
+                                        }
+                                    }
+                                }
+                            }
+                            else if (_pipedStream != null && mimeType.StartsWith("video/") && _liveCacher != null)
                             {
                                 long totalSize = _contentSize ?? 1000000000L; // Default to 1 GB if not specified
 
@@ -730,6 +860,35 @@ namespace CastBlueScreen
                 return "video/webm";
             }
             return "video/mp4"; // default fallback for piped video streams
+        }
+
+        static async Task<double> GetVideoDurationAsync(string filePath)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "ffprobe",
+                    Arguments = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nogey=1 \"{filePath}\"",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var process = Process.Start(startInfo))
+                {
+                    if (process != null)
+                      {
+                        string output = await process.StandardOutput.ReadToEndAsync();
+                        await process.WaitForExitAsync();
+                        if (double.TryParse(output.Trim(), out double duration))
+                        {
+                            return duration;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return 0;
         }
     }
 
