@@ -291,11 +291,9 @@ namespace CastBlueScreen
                     var hlsStartInfo = new ProcessStartInfo
                     {
                         FileName = "ffmpeg",
-                        Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" {ffmpegMapArgs} " +
+                        Arguments = $"-loglevel quiet -nostats -i \"{MediaServer._sourceFilePath}\" {ffmpegMapArgs} " +
                                     $"-f hls -hls_time 4 -hls_playlist_type event -hls_flags independent_segments " +
                                     $"-hls_segment_filename \"{Path.Combine(MediaServer._hlsDir, "seg%05d.ts")}\" -y \"{Path.Combine(MediaServer._hlsDir, "index.m3u8")}\"",
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
                     };
@@ -345,9 +343,7 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffmpeg",
-                            Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:a:0 -vn -c:a libmp3lame -q:a 2 -y \"{MediaServer._tempFilePath}\"",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
+                            Arguments = $"-loglevel quiet -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:a:0 -vn -c:a libmp3lame -q:a 2 -y \"{MediaServer._tempFilePath}\"",
                             UseShellExecute = false,
                             CreateNoWindow = true
                         };
@@ -378,9 +374,7 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffmpeg",
-                            Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
+                            Arguments = $"-loglevel quiet -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
                             UseShellExecute = false,
                             CreateNoWindow = true
                         };
@@ -668,9 +662,7 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffplay",
-                            Arguments = $"-loglevel warning -nostats -autoexit \"{previewUri}\"",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
+                            Arguments = $"-loglevel quiet -nostats -autoexit \"{previewUri}\"",
                             UseShellExecute = false,
                             CreateNoWindow = false
                         };
@@ -713,9 +705,7 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffplay",
-                            Arguments = $"-loglevel warning -nostats -autoexit \"{previewUri}\"",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
+                            Arguments = $"-loglevel quiet -nostats -autoexit \"{previewUri}\"",
                             UseShellExecute = false,
                             CreateNoWindow = false
                         };

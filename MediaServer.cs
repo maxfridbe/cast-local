@@ -173,11 +173,9 @@ namespace CastBlueScreen
                                               var startInfo = new ProcessStartInfo
                                               {
                                                   FileName = "ffmpeg",
-                                                  Arguments = $"-loglevel warning -nostats -ss {querySeek:F2} -i \"{_sourceFilePath}\" {mapArgs} " +
+                                                  Arguments = $"-loglevel quiet -nostats -ss {querySeek:F2} -i \"{_sourceFilePath}\" {mapArgs} " +
                                                               (_isAudioOnly ? "" : "-movflags frag_keyframe+empty_moov") + 
                                                               $" -y \"{_tempFilePath}\"",
-                                                  RedirectStandardOutput = true,
-                                                  RedirectStandardError = true,
                                                   UseShellExecute = false,
                                                   CreateNoWindow = true
                                               };
