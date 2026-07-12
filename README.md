@@ -62,16 +62,17 @@ Pass a local audio file (MP3, AAC, FLAC, WAV, M4A, etc.) directly. Native audio 
 ./bin/Release/net10.0/linux-x64/publish/cast-local "/var/home/maxfridbe/Music/favorite_song.mp3" --cc 1
 ```
 
-### 3. HTML, SVG, and Web URL Casting Mode (Chromium-to-MP4)
+### 3. HTML, SVG, and Web URL Casting Mode (Chromium-to-MP4 / Live MPEG-TS)
 Since standard Chromecast receivers cannot render complex offline SVG animations, local HTML files, or remote pages with custom layouts, this utility embeds a headless browser engine (`PuppeteerSharp`). 
 
-When passed a local `.svg`, `.html`, `.htm` file, or a remote web URL (starting with `http://` or `https://`), the utility launches Chromium, navigates to the page (waiting for the network resources to idle), waits for an optional custom initialization delay, and records the screen frame-by-frame into a high-quality H.264 MP4 movie using `ffmpeg`.
+When passed a local `.svg`, `.html`, `.htm` file, or a remote web URL (starting with `http://` or `https://`), the utility launches Chromium, navigates to the page (waiting for the network resources to idle), waits for an optional custom initialization delay, and records the screen frame-by-frame into a high-quality H.264 movie using `ffmpeg`.
 
 Options for page rendering:
 * `-r, --resolution <WxH>`: Specify viewport resolution (e.g. `1280x720`, default `1920x1080`).
 * `-d, --duration <time>`: Specify playtime duration of the compiled movie (e.g. `10s`, `1m`, default `30s`).
 * `-y, --delay <time>`: Wait delay (e.g. `3s`, default `0s`) after page load to allow assets, APIs, and scripts to settle before starting the frame capture.
 * `-p, --preview`: Completely bypass network discovery/Chromecast connections and play the rendered stream in a local `ffplay` window. Perfect for offline template testing.
+* `--live`: Enables infinite real-time streaming of the headless browser canvas. Converts frame captures on-the-fly to an MPEG Transport Stream (`.ts` / `video/mp2t`) served progressively with zero buffering delays.
 
 ```bash
 # Render a local animated SVG and preview it locally
@@ -82,6 +83,12 @@ cast-local "https://news.ycombinator.com" --delay 2s --duration 10s --preview
 
 # Render Google.com with a 3-second delay, compile a 10s video, and cast it to TV device #1
 cast-local "https://www.google.com" --delay 3s --duration 10s --cc 1
+
+# Stream Hacker News live and view it locally via ffplay preview
+cast-local "https://news.ycombinator.com" --live --delay 2s --preview
+
+# Cast a live stream of Google.com to your Chromecast #1
+cast-local "https://www.google.com" --live --delay 3s --cc 1
 ```
 
 ### 4. Network Scan Mode (`--scan`)
