@@ -158,8 +158,10 @@ namespace CastBlueScreen
                     if (MediaServer._isLiveMode)
                     {
                         MediaServer._isTranscoding = true;
-                        MediaServer._tempFilePath = Path.Combine(Path.GetTempPath(), "cast_live_render_" + Guid.NewGuid().ToString("N") + ".ts");
-                        Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} live source detected. Initializing background render to: {MediaServer._tempFilePath}");
+                        MediaServer._hlsDir = Path.Combine(Path.GetTempPath(), "cast_live_hls_" + Guid.NewGuid().ToString("N"));
+                        Directory.CreateDirectory(MediaServer._hlsDir);
+                        MediaServer._tempFilePath = Path.Combine(MediaServer._hlsDir, "index.m3u8");
+                        Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} live source detected. Initializing background HLS render to: {MediaServer._hlsDir}");
 
                         string targetRenderPath = MediaServer._tempFilePath;
                         string sourceInput = MediaServer._sourceFilePath;
@@ -178,17 +180,29 @@ namespace CastBlueScreen
                         MediaServer._renderedHtmlPath = MediaServer._tempFilePath;
                         MediaServer._sourceFilePath = MediaServer._tempFilePath;
 
-                        // Wait for temp file to start writing
-                        Console.WriteLine("[Info] Pre-buffering live render stream...");
+                        // Wait for initial HLS segments
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine("[Info] Waiting for initial HLS segments before casting...");
+                        Console.ResetColor();
+
+                        string playlistPath = MediaServer._tempFilePath;
                         var sw = Stopwatch.StartNew();
                         while (sw.ElapsedMilliseconds < 15000)
                         {
-                            if (File.Exists(MediaServer._tempFilePath) && new FileInfo(MediaServer._tempFilePath).Length > 20000)
+                            if (File.Exists(playlistPath))
                             {
-                                break;
+                                int segmentCount = 0;
+                                try
+                                {
+                                    segmentCount = File.ReadAllLines(playlistPath).Count(l => l.StartsWith("#EXTINF"));
+                                }
+                                catch { }
+                                Console.Write($"\r[Pre-buffer] {segmentCount} segment(s) ready...");
+                                if (segmentCount >= 2) break;
                             }
                             await Task.Delay(250);
                         }
+                        Console.WriteLine();
                     }
                     else
                     {

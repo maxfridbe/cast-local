@@ -148,9 +148,11 @@ namespace CastBlueScreen
                 await Task.Delay((int)(delaySeconds * 1000));
             }
 
-            string formatFlags = outputMp4Path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
-                ? "-f mpegts"
-                : (double.IsInfinity(durationSeconds) ? "-movflags frag_keyframe+empty_moov+default_base_moof -g 30 -keyint_min 30 -sc_threshold 0" : "");
+            string formatFlags = outputMp4Path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+                ? $"-f hls -hls_time 2 -hls_playlist_type event -hls_flags independent_segments -hls_segment_filename \"{Path.Combine(Path.GetDirectoryName(outputMp4Path)!, "seg%05d.ts")}\""
+                : (outputMp4Path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
+                    ? "-f mpegts"
+                    : (double.IsInfinity(durationSeconds) ? "-movflags frag_keyframe+empty_moov+default_base_moof -g 30 -keyint_min 30 -sc_threshold 0" : ""));
             var startInfo = new ProcessStartInfo
             {
                 FileName = "ffmpeg",
