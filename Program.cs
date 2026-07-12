@@ -37,6 +37,7 @@ namespace CastBlueScreen
             long? contentSize = null;
             bool isLiveFlag = false;
             bool scanMode = false;
+            bool previewMode = false;
             string resolutionStr = "1920x1080";
             string durationStr = "30s";
 
@@ -66,6 +67,10 @@ namespace CastBlueScreen
                 else if (args[i] == "--scan")
                 {
                     scanMode = true;
+                }
+                else if (args[i] == "--preview" || args[i] == "-p")
+                {
+                    previewMode = true;
                 }
                 else if ((args[i] == "--resolution" || args[i] == "-r") && i + 1 < args.Length)
                 {
@@ -323,172 +328,204 @@ namespace CastBlueScreen
                 }
             }
 
-            Console.WriteLine("[Info] Scanning network interfaces and probing Living Room TV (192.168.50.109)...");
+            string mimeType = MediaServer._hlsDir != null 
+                ? "application/x-mpegURL" 
+                : (MediaServer._sourceFilePath != null 
+                    ? (MediaServer._isAudioOnly ? MediaServer.GetAudioMimeType(MediaServer._tempFilePath ?? MediaServer._sourceFilePath) : "video/mp4") 
+                    : MediaServer.GetMimeType(imageBytes));
+
+            string extension = mimeType switch
+            {
+                "application/x-mpegURL" => "m3u8",
+                "video/mp4" => "mp4",
+                "audio/mp4" => "mp4",
+                "audio/mpeg" => "mp3",
+                "audio/aac" => "aac",
+                "audio/wav" => "wav",
+                "audio/flac" => "flac",
+                "audio/ogg" => "ogg",
+                "video/webm" => "webm",
+                "image/jpeg" => "jpg",
+                "image/gif" => "gif",
+                _ => "png"
+            };
+
             List<IReceiver> receivers = new List<IReceiver>();
-            try
+            if (!previewMode)
             {
-                var interfaces = NetworkInterface.GetAllNetworkInterfaces()
-                    .Where(ni => ni.OperationalStatus == OperationalStatus.Up &&
-                                 ni.SupportsMulticast &&
-                                 ni.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                    .ToList();
-
-                var locator = new DeviceLocator();
-                
-                // 1. Kick off parallel mDNS scans on each interface
-                var scanTasks = interfaces.Select(async ni =>
+                Console.WriteLine("[Info] Scanning network interfaces and probing Living Room TV (192.168.50.109)...");
+                try
                 {
-                    try
-                    {
-                        var found = await locator.FindReceiversAsync(ni);
-                        return found ?? Enumerable.Empty<IReceiver>();
-                    }
-                    catch
-                    {
-                        return Enumerable.Empty<IReceiver>();
-                    }
-                }).ToList();
+                    var interfaces = NetworkInterface.GetAllNetworkInterfaces()
+                        .Where(ni => ni.OperationalStatus == OperationalStatus.Up &&
+                                     ni.SupportsMulticast &&
+                                     ni.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                        .ToList();
 
-                // 2. In parallel, probe the target TV IP 192.168.50.109 directly
-                var probeTask = Task.Run(async () =>
-                {
-                    string targetTvIp = "192.168.50.109";
-                    bool isTvOpen = await DeviceDiscovery.CheckPortAsync(targetTvIp, 8009, 1500);
-                    if (isTvOpen)
+                    var locator = new DeviceLocator();
+                    
+                    // 1. Kick off parallel mDNS scans on each interface
+                    var scanTasks = interfaces.Select(async ni =>
                     {
-                        string name = await DeviceDiscovery.GetEurekaDeviceNameAsync(targetTvIp);
-                        if (string.IsNullOrEmpty(name))
+                        try
                         {
-                            name = "Living Room TV";
+                            var found = await locator.FindReceiversAsync(ni);
+                            return found ?? Enumerable.Empty<IReceiver>();
                         }
-                        IReceiver probedReceiver = new Receiver
+                        catch
                         {
-                            Id = Guid.NewGuid().ToString(),
-                            FriendlyName = name,
-                            IPEndPoint = new IPEndPoint(IPAddress.Parse(targetTvIp), 8009)
-                        };
-                        return new List<IReceiver> { probedReceiver };
-                    }
-                    return new List<IReceiver>();
-                });
+                            return Enumerable.Empty<IReceiver>();
+                        }
+                    }).ToList();
 
-                // Await all discovery methods
-                await Task.WhenAll(scanTasks);
-                var probedList = await probeTask;
-
-                var allFound = new List<IReceiver>();
-                foreach (var task in scanTasks)
-                {
-                    allFound.AddRange(task.Result);
-                }
-                allFound.AddRange(probedList);
-
-                // De-duplicate discovered devices by IP address
-                receivers = allFound
-                    .Where(r => r != null && r.IPEndPoint != null)
-                    .GroupBy(r => r.IPEndPoint!.Address.ToString())
-                    .Select(g => g.First())
-                    .ToList();
-            }
-            catch (Exception ex)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"[Warning] Discovery scan encountered errors: {ex.Message}");
-                Console.ResetColor();
-            }
-
-            Console.WriteLine($"[Info] Discovery complete. Found {receivers.Count} device(s).");
-
-            if (scanMode)
-            {
-                if (receivers.Count > 0)
-                {
-                    Console.WriteLine("\nDiscovered devices:");
-                    for (int i = 0; i < receivers.Count; i++)
+                    // 2. In parallel, probe the target TV IP 192.168.50.109 directly
+                    var probeTask = Task.Run(async () =>
                     {
-                        Console.WriteLine($"  [{i + 1}] {receivers[i].FriendlyName} ({receivers[i].IPEndPoint})");
-                    }
-                }
-                else
-                {
-                    Console.WriteLine("\nNo devices discovered.");
-                }
-                return;
-            }
+                        string targetTvIp = "192.168.50.109";
+                        bool isTvOpen = await DeviceDiscovery.CheckPortAsync(targetTvIp, 8009, 1500);
+                        if (isTvOpen)
+                        {
+                            string name = await DeviceDiscovery.GetEurekaDeviceNameAsync(targetTvIp);
+                            if (string.IsNullOrEmpty(name))
+                            {
+                                name = "Living Room TV";
+                            }
+                            IReceiver probedReceiver = new Receiver
+                            {
+                                Id = Guid.NewGuid().ToString(),
+                                FriendlyName = name,
+                                IPEndPoint = new IPEndPoint(IPAddress.Parse(targetTvIp), 8009)
+                            };
+                            return new List<IReceiver> { probedReceiver };
+                        }
+                        return new List<IReceiver>();
+                    });
 
-            if (ccIndex.HasValue)
-            {
-                if (receivers.Count == 0)
+                    // Await all discovery methods
+                    await Task.WhenAll(scanTasks);
+                    var probedList = await probeTask;
+
+                    var allFound = new List<IReceiver>();
+                    foreach (var task in scanTasks)
+                    {
+                        allFound.AddRange(task.Result);
+                    }
+                    allFound.AddRange(probedList);
+
+                    // De-duplicate discovered devices by IP address
+                    receivers = allFound
+                        .Where(r => r != null && r.IPEndPoint != null)
+                        .GroupBy(r => r.IPEndPoint!.Address.ToString())
+                        .Select(g => g.First())
+                        .ToList();
+                }
+                catch (Exception ex)
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("[Error] --cc option specified, but no devices were discovered.");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[Warning] Discovery scan encountered errors: {ex.Message}");
                     Console.ResetColor();
+                }
+
+                Console.WriteLine($"[Info] Discovery complete. Found {receivers.Count} device(s).");
+
+                if (scanMode)
+                {
+                    if (receivers.Count > 0)
+                    {
+                        Console.WriteLine("\nDiscovered devices:");
+                        for (int i = 0; i < receivers.Count; i++)
+                        {
+                            Console.WriteLine($"  [{i + 1}] {receivers[i].FriendlyName} ({receivers[i].IPEndPoint})");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("\nNo devices discovered.");
+                    }
                     return;
                 }
 
-                if (ccIndex.Value < 1 || ccIndex.Value > receivers.Count)
+                if (ccIndex.HasValue)
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"[Error] --cc {ccIndex.Value} is out of range. Please choose an index between 1 and {receivers.Count}.");
-                    Console.ResetColor();
-                    return;
-                }
-
-                var selectedReceiver = receivers[ccIndex.Value - 1];
-                targetIp = selectedReceiver.IPEndPoint?.Address.ToString();
-                Console.WriteLine($"[Info] Selected device --cc {ccIndex.Value}: {selectedReceiver.FriendlyName} ({targetIp})");
-            }
-            else if (targetIp == null)
-            {
-                if (receivers.Count > 0)
-                {
-                    Console.WriteLine("\nDiscovered devices:");
-                    for (int i = 0; i < receivers.Count; i++)
-                    {
-                        Console.WriteLine($"  [{i + 1}] {receivers[i].FriendlyName} ({receivers[i].IPEndPoint})");
-                    }
-                    Console.WriteLine($"  [{receivers.Count + 1}] Enter IP address manually");
-
-                    Console.Write($"\nSelect a device (1-{receivers.Count + 1}): ");
-                    string? choiceInput = Console.ReadLine();
-                    if (int.TryParse(choiceInput, out int choice) && choice >= 1 && choice <= receivers.Count)
-                    {
-                        var endPoint = receivers[choice - 1].IPEndPoint;
-                        if (endPoint != null)
-                        {
-                            targetIp = endPoint.Address.ToString();
-                        }
-                    }
-                }
-
-                if (targetIp == null)
-                {
-                    Console.Write("\nPlease enter the IP address of your TV manually (e.g., 192.168.1.50): ");
-                    string? ipInput = Console.ReadLine();
-                    while (string.IsNullOrWhiteSpace(ipInput) || !IPAddress.TryParse(ipInput.Trim(), out _))
+                    if (receivers.Count == 0)
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.Write("Invalid IP address. Please enter a valid IPv4 address: ");
+                        Console.WriteLine("[Error] --cc option specified, but no devices were discovered.");
                         Console.ResetColor();
-                        ipInput = Console.ReadLine();
+                        return;
                     }
-                    targetIp = ipInput.Trim();
+
+                    if (ccIndex.Value < 1 || ccIndex.Value > receivers.Count)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[Error] --cc {ccIndex.Value} is out of range. Please choose an index between 1 and {receivers.Count}.");
+                        Console.ResetColor();
+                        return;
+                    }
+
+                    var selectedReceiver = receivers[ccIndex.Value - 1];
+                    targetIp = selectedReceiver.IPEndPoint?.Address.ToString();
+                    Console.WriteLine($"[Info] Selected device --cc {ccIndex.Value}: {selectedReceiver.FriendlyName} ({targetIp})");
+                }
+                else if (targetIp == null)
+                {
+                    if (receivers.Count > 0)
+                    {
+                        Console.WriteLine("\nDiscovered devices:");
+                        for (int i = 0; i < receivers.Count; i++)
+                        {
+                            Console.WriteLine($"  [{i + 1}] {receivers[i].FriendlyName} ({receivers[i].IPEndPoint})");
+                        }
+                        Console.WriteLine($"  [{receivers.Count + 1}] Enter IP address manually");
+
+                        Console.Write($"\nSelect a device (1-{receivers.Count + 1}): ");
+                        string? choiceInput = Console.ReadLine();
+                        if (int.TryParse(choiceInput, out int choice) && choice >= 1 && choice <= receivers.Count)
+                        {
+                            var endPoint = receivers[choice - 1].IPEndPoint;
+                            if (endPoint != null)
+                            {
+                                targetIp = endPoint.Address.ToString();
+                            }
+                        }
+                    }
+
+                    if (targetIp == null)
+                    {
+                        Console.Write("\nPlease enter the IP address of your TV manually (e.g., 192.168.1.50): ");
+                        string? ipInput = Console.ReadLine();
+                        while (string.IsNullOrWhiteSpace(ipInput) || !IPAddress.TryParse(ipInput.Trim(), out _))
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.Write("Invalid IP address. Please enter a valid IPv4 address: ");
+                            Console.ResetColor();
+                            ipInput = Console.ReadLine();
+                        }
+                        targetIp = ipInput.Trim();
+                    }
+                }
+            }
+            else
+            {
+                if (scanMode)
+                {
+                    Console.WriteLine("[Info] Scan option requested in preview mode. Skipping discovery.");
+                    return;
                 }
             }
 
-            Console.WriteLine($"\n[Info] Target TV IP: {targetIp}");
-
-            if (targetIp == null)
+            if (targetIp != null)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[Error] No target IP address specified.");
-                Console.ResetColor();
-                return;
+                Console.WriteLine($"\n[Info] Target TV IP: {targetIp}");
             }
 
             // Find local active IP to host our web server
-            string localIp = NetworkUtils.GetLocalIpAddress(targetIp);
-            Console.WriteLine($"[Info] Local IP Address: {localIp}");
+            string localIp = "127.0.0.1";
+            if (targetIp != null)
+            {
+                localIp = NetworkUtils.GetLocalIpAddress(targetIp);
+                Console.WriteLine($"[Info] Local IP Address: {localIp}");
+            }
 
             // Start simple HTTP Server to host the blue image or transcode segment
             HttpListener? listener = null;
@@ -506,8 +543,89 @@ namespace CastBlueScreen
                 return;
             }
 
+            if (targetIp == null)
+            {
+                if (previewMode)
+                {
+                    // Run the HTTP server request processing in the background
+                    _ = Task.Run(() => MediaServer.RunHttpServerAsync(listener, imageBytes));
+
+                    string previewExtension = extension;
+                    string previewUri = $"http://127.0.0.1:{port}/media.{previewExtension}";
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("\n========================================================");
+                    Console.WriteLine(" [Success] Local preview started!");
+                    Console.WriteLine($" Preview URL: {previewUri}");
+                    Console.WriteLine("========================================================");
+                    Console.ResetColor();
+
+                    Console.WriteLine("[Info] Launching local preview window via ffplay...");
+                    try
+                    {
+                        var startInfo = new ProcessStartInfo
+                        {
+                            FileName = "ffplay",
+                            Arguments = $"-autoexit \"{previewUri}\"",
+                            UseShellExecute = false,
+                            CreateNoWindow = false
+                        };
+                        using (var previewProcess = Process.Start(startInfo))
+                        {
+                            if (previewProcess != null)
+                            {
+                                previewProcess.WaitForExit();
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Error] Failed to launch local preview: {ex.Message}");
+                    }
+                    return;
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("[Error] No target IP address specified.");
+                    Console.ResetColor();
+                    return;
+                }
+            }
+
             // Run the HTTP server request processing in the background
             _ = Task.Run(() => MediaServer.RunHttpServerAsync(listener, imageBytes));
+
+            // Launch local preview window if requested alongside casting
+            if (previewMode)
+            {
+                string previewExtension = extension;
+                string previewUri = $"http://127.0.0.1:{port}/media.{previewExtension}";
+                Console.WriteLine($"[Info] Launching local preview window via ffplay: {previewUri}");
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var startInfo = new ProcessStartInfo
+                        {
+                            FileName = "ffplay",
+                            Arguments = $"-autoexit \"{previewUri}\"",
+                            UseShellExecute = false,
+                            CreateNoWindow = false
+                        };
+                        using (var previewProcess = Process.Start(startInfo))
+                        {
+                            if (previewProcess != null)
+                            {
+                                previewProcess.WaitForExit();
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Warning] Failed to launch local preview: {ex.Message}");
+                    }
+                });
+            }
 
             // Connect to Chromecast and Cast the Image
             Console.WriteLine("[Info] Connecting to the TV...");
@@ -527,27 +645,7 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = MediaServer._hlsDir != null 
-                    ? "application/x-mpegURL" 
-                    : (MediaServer._sourceFilePath != null 
-                        ? (MediaServer._isAudioOnly ? MediaServer.GetAudioMimeType(MediaServer._tempFilePath ?? MediaServer._sourceFilePath) : "video/mp4") 
-                        : MediaServer.GetMimeType(imageBytes));
 
-                string extension = mimeType switch
-                {
-                    "application/x-mpegURL" => "m3u8",
-                    "video/mp4" => "mp4",
-                    "audio/mp4" => "mp4",
-                    "audio/mpeg" => "mp3",
-                    "audio/aac" => "aac",
-                    "audio/wav" => "wav",
-                    "audio/flac" => "flac",
-                    "audio/ogg" => "ogg",
-                    "video/webm" => "webm",
-                    "image/jpeg" => "jpg",
-                    "image/gif" => "gif",
-                    _ => "png"
-                };
 
                 string imageUri = $"http://{localIp}:{port}/media.{extension}?t={DateTime.UtcNow.Ticks}";
                 Console.WriteLine($"[Info] Casting media URL: {imageUri} (MIME: {mimeType})");
@@ -741,7 +839,8 @@ namespace CastBlueScreen
             Console.WriteLine("  --size <bytes>   Specify the estimated total size of the stream in bytes.");
             Console.WriteLine("  --live           Use legacy live transcoding mode (fragmented MP4) instead of HLS.");
             Console.WriteLine("  -r, --resolution Specify viewport resolution for SVG/HTML rendering (e.g. 1920x1080, default 1920x1080).");
-            Console.WriteLine("  -d, --duration   Specify playtime duration for SVG/HTML rendering (e.g. 30s or 30, default 30s).\n");
+            Console.WriteLine("  -d, --duration   Specify playtime duration for SVG/HTML rendering (e.g. 30s or 30, default 30s).");
+            Console.WriteLine("  -p, --preview    Launch a local ffplay preview window showing exactly what will be cast.\n");
             Console.WriteLine("Examples:");
             Console.WriteLine("  cast-local --scan");
             Console.WriteLine("  cast-local \"/path/to/video.mkv\"");
