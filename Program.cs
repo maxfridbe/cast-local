@@ -155,26 +155,73 @@ namespace CastBlueScreen
                         durationSeconds = dur;
                     }
 
-                    string compiledMp4 = Path.Combine(Path.GetTempPath(), "rendered_web_" + Guid.NewGuid().ToString("N") + ".mp4");
-                    try
+                    if (MediaServer._isLiveMode)
                     {
-                        Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} source detected. Rendering page to MP4 at {width}x{height} for {durationSeconds} seconds...");
-                        await FfmpegUtils.RenderWebPageToMp4Async(MediaServer._sourceFilePath, compiledMp4, width, height, durationSeconds, delaySeconds);
-                        
-                        MediaServer._renderedHtmlPath = compiledMp4;
-                        MediaServer._sourceFilePath = compiledMp4;
+                        MediaServer._isTranscoding = true;
+                        MediaServer._tempFilePath = Path.Combine(Path.GetTempPath(), "cast_live_render_" + Guid.NewGuid().ToString("N") + ".ts");
+                        Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} live source detected. Initializing background render to: {MediaServer._tempFilePath}");
+
+                        string targetRenderPath = MediaServer._tempFilePath;
+                        string sourceInput = MediaServer._sourceFilePath;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await FfmpegUtils.RenderWebPageToMp4Async(sourceInput, targetRenderPath, width, height, double.PositiveInfinity, delaySeconds);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"\n[Error] Live web render crashed: {ex.Message}");
+                            }
+                        });
+
+                        MediaServer._renderedHtmlPath = MediaServer._tempFilePath;
+                        MediaServer._sourceFilePath = MediaServer._tempFilePath;
+
+                        // Wait for temp file to start writing
+                        Console.WriteLine("[Info] Pre-buffering live render stream...");
+                        var sw = Stopwatch.StartNew();
+                        while (sw.ElapsedMilliseconds < 15000)
+                        {
+                            if (File.Exists(MediaServer._tempFilePath) && new FileInfo(MediaServer._tempFilePath).Length > 20000)
+                            {
+                                break;
+                            }
+                            await Task.Delay(250);
+                        }
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[Error] Failed to render HTML/SVG/URL source: {ex.Message}");
-                        Console.ResetColor();
-                        if (File.Exists(compiledMp4)) File.Delete(compiledMp4);
-                        return;
+                        string compiledMp4 = Path.Combine(Path.GetTempPath(), "rendered_web_" + Guid.NewGuid().ToString("N") + ".mp4");
+                        try
+                        {
+                            Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} source detected. Rendering page to MP4 at {width}x{height} for {durationSeconds} seconds...");
+                            await FfmpegUtils.RenderWebPageToMp4Async(MediaServer._sourceFilePath, compiledMp4, width, height, durationSeconds, delaySeconds);
+                            
+                            MediaServer._renderedHtmlPath = compiledMp4;
+                            MediaServer._sourceFilePath = compiledMp4;
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"[Error] Failed to render HTML/SVG/URL source: {ex.Message}");
+                            Console.ResetColor();
+                            if (File.Exists(compiledMp4)) File.Delete(compiledMp4);
+                            return;
+                        }
                     }
                 }
 
-                bool hasVideo = await FfmpegUtils.HasVideoAsync(MediaServer._sourceFilePath);
+                bool hasVideo = true;
+                if (MediaServer._isLiveMode && MediaServer._renderedHtmlPath != null)
+                {
+                    hasVideo = true;
+                }
+                else
+                {
+                    hasVideo = await FfmpegUtils.HasVideoAsync(MediaServer._sourceFilePath);
+                }
+
                 if (hasVideo)
                 {
                     isVideo = true;
@@ -186,10 +233,19 @@ namespace CastBlueScreen
                     MediaServer._isAudioOnly = true;
                 }
 
-                MediaServer._sourceFileSize = new FileInfo(MediaServer._sourceFilePath).Length;
-                MediaServer._sourceDuration = await FfmpegUtils.GetVideoDurationAsync(MediaServer._sourceFilePath);
-                Console.WriteLine($"[Info] Local {(isVideo ? "video" : "audio")} transcoding proxy mode initialized for: {MediaServer._sourceFilePath}");
-                Console.WriteLine($"[Info] File Size: {MediaServer._sourceFileSize} bytes, Duration: {MediaServer._sourceDuration:F2} seconds");
+                if (MediaServer._isLiveMode && MediaServer._renderedHtmlPath != null)
+                {
+                    MediaServer._sourceFileSize = 0;
+                    MediaServer._sourceDuration = double.PositiveInfinity;
+                    Console.WriteLine($"[Info] Local live web render mode initialized for: {MediaServer._sourceFilePath}");
+                }
+                else
+                {
+                    MediaServer._sourceFileSize = new FileInfo(MediaServer._sourceFilePath).Length;
+                    MediaServer._sourceDuration = await FfmpegUtils.GetVideoDurationAsync(MediaServer._sourceFilePath);
+                    Console.WriteLine($"[Info] Local {(isVideo ? "video" : "audio")} transcoding proxy mode initialized for: {MediaServer._sourceFilePath}");
+                    Console.WriteLine($"[Info] File Size: {MediaServer._sourceFileSize} bytes, Duration: {MediaServer._sourceDuration:F2} seconds");
+                }
 
                 bool isNativeAudio = false;
                 if (isAudio)
@@ -221,9 +277,11 @@ namespace CastBlueScreen
                     var hlsStartInfo = new ProcessStartInfo
                     {
                         FileName = "ffmpeg",
-                        Arguments = $"-i \"{MediaServer._sourceFilePath}\" {ffmpegMapArgs} " +
+                        Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" {ffmpegMapArgs} " +
                                     $"-f hls -hls_time 4 -hls_playlist_type event -hls_flags independent_segments " +
                                     $"-hls_segment_filename \"{Path.Combine(MediaServer._hlsDir, "seg%05d.ts")}\" -y \"{Path.Combine(MediaServer._hlsDir, "index.m3u8")}\"",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
                         UseShellExecute = false,
                         CreateNoWindow = true
                     };
@@ -261,7 +319,7 @@ namespace CastBlueScreen
                     }
                     Console.WriteLine("\n[Info] Initial HLS segments ready! Launching cast...");
                 }
-                else
+                else if (MediaServer._renderedHtmlPath == null)
                 {
                     MediaServer._isTranscoding = true;
                     if (MediaServer._isAudioOnly)
@@ -273,7 +331,9 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffmpeg",
-                            Arguments = $"-i \"{MediaServer._sourceFilePath}\" -map 0:a:0 -vn -c:a libmp3lame -q:a 2 -y \"{MediaServer._tempFilePath}\"",
+                            Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:a:0 -vn -c:a libmp3lame -q:a 2 -y \"{MediaServer._tempFilePath}\"",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
                             UseShellExecute = false,
                             CreateNoWindow = true
                         };
@@ -304,7 +364,9 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffmpeg",
-                            Arguments = $"-i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
+                            Arguments = $"-loglevel warning -nostats -i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
                             UseShellExecute = false,
                             CreateNoWindow = true
                         };
@@ -355,12 +417,15 @@ namespace CastBlueScreen
             string mimeType = MediaServer._hlsDir != null 
                 ? "application/x-mpegURL" 
                 : (MediaServer._sourceFilePath != null 
-                    ? (MediaServer._isAudioOnly ? MediaServer.GetAudioMimeType(MediaServer._tempFilePath ?? MediaServer._sourceFilePath) : "video/mp4") 
+                    ? (MediaServer._isAudioOnly 
+                        ? MediaServer.GetAudioMimeType(MediaServer._tempFilePath ?? MediaServer._sourceFilePath) 
+                        : (MediaServer._sourceFilePath.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ? "video/mp2t" : "video/mp4")) 
                     : MediaServer.GetMimeType(imageBytes));
 
             string extension = mimeType switch
             {
                 "application/x-mpegURL" => "m3u8",
+                "video/mp2t" => "ts",
                 "video/mp4" => "mp4",
                 "audio/mp4" => "mp4",
                 "audio/mpeg" => "mp3",
@@ -589,7 +654,9 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffplay",
-                            Arguments = $"-autoexit \"{previewUri}\"",
+                            Arguments = $"-loglevel warning -nostats -autoexit \"{previewUri}\"",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
                             UseShellExecute = false,
                             CreateNoWindow = false
                         };
@@ -632,7 +699,9 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffplay",
-                            Arguments = $"-autoexit \"{previewUri}\"",
+                            Arguments = $"-loglevel warning -nostats -autoexit \"{previewUri}\"",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
                             UseShellExecute = false,
                             CreateNoWindow = false
                         };

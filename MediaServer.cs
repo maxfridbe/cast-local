@@ -79,7 +79,9 @@ namespace CastBlueScreen
                         if (url != null)
                         {
                             string mimeType = _sourceFilePath != null 
-                                ? (_isAudioOnly ? GetAudioMimeType(_tempFilePath ?? _sourceFilePath) : "video/mp4") 
+                                ? (_isAudioOnly 
+                                    ? GetAudioMimeType(_tempFilePath ?? _sourceFilePath) 
+                                    : (_sourceFilePath.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) ? "video/mp2t" : "video/mp4")) 
                                 : GetMimeType(imageBytes);
 
                             if (_hlsDir != null)
@@ -88,7 +90,7 @@ namespace CastBlueScreen
                             }
                             else if (_sourceFilePath != null)
                             {
-                                long totalSize = _sourceFileSize;
+                                long totalSize = _isLiveMode ? 999999999999L : _sourceFileSize;
                                 response.ContentType = mimeType;
                                 response.AddHeader("Access-Control-Allow-Origin", "*");
                                 if (!_isLiveMode)
@@ -168,15 +170,17 @@ namespace CastBlueScreen
                                                  ? "-map 0:a:0? -vn -c:a libmp3lame -q:a 2" 
                                                  : "-map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2";
 
-                                             var startInfo = new ProcessStartInfo
-                                             {
-                                                 FileName = "ffmpeg",
-                                                 Arguments = $"-ss {querySeek:F2} -i \"{_sourceFilePath}\" {mapArgs} " +
-                                                             (_isAudioOnly ? "" : "-movflags frag_keyframe+empty_moov") + 
-                                                             $" -y \"{_tempFilePath}\"",
-                                                 UseShellExecute = false,
-                                                 CreateNoWindow = true
-                                             };
+                                              var startInfo = new ProcessStartInfo
+                                              {
+                                                  FileName = "ffmpeg",
+                                                  Arguments = $"-loglevel warning -nostats -ss {querySeek:F2} -i \"{_sourceFilePath}\" {mapArgs} " +
+                                                              (_isAudioOnly ? "" : "-movflags frag_keyframe+empty_moov") + 
+                                                              $" -y \"{_tempFilePath}\"",
+                                                  RedirectStandardOutput = true,
+                                                  RedirectStandardError = true,
+                                                  UseShellExecute = false,
+                                                  CreateNoWindow = true
+                                              };
 
                                              _transcodeProcess = Process.Start(startInfo);
 

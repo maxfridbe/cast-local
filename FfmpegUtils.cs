@@ -148,12 +148,16 @@ namespace CastBlueScreen
                 await Task.Delay((int)(delaySeconds * 1000));
             }
 
-            // Start ffmpeg process for streaming screenshot frames
+            string formatFlags = outputMp4Path.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
+                ? "-f mpegts"
+                : (double.IsInfinity(durationSeconds) ? "-movflags frag_keyframe+empty_moov+default_base_moof -g 30 -keyint_min 30 -sc_threshold 0" : "");
             var startInfo = new ProcessStartInfo
             {
                 FileName = "ffmpeg",
-                Arguments = $"-y -f image2pipe -framerate 30 -i - -c:v libx264 -pix_fmt yuv420p -b:v 4000k \"{outputMp4Path}\"",
+                Arguments = $"-loglevel warning -nostats -y -f image2pipe -framerate 30 -i - -c:v libx264 -pix_fmt yuv420p -b:v 4000k {formatFlags} \"{outputMp4Path}\"",
                 RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -164,9 +168,15 @@ namespace CastBlueScreen
                 throw new Exception("Failed to start FFmpeg worker process.");
             }
 
+            // Keep reference of live encoder in MediaServer if running progressively
+            if (double.IsInfinity(durationSeconds))
+            {
+                MediaServer._transcodeProcess = ffmpegProcess;
+            }
+
             using var stdin = ffmpegProcess.StandardInput.BaseStream;
             int fps = 30;
-            int totalFrames = (int)(durationSeconds * fps);
+            int totalFrames = double.IsInfinity(durationSeconds) ? int.MaxValue : (int)(durationSeconds * fps);
             double frameDelayMs = 1000.0 / fps;
 
             // Try to detect and pause SMIL animations
@@ -186,9 +196,16 @@ namespace CastBlueScreen
                 : "[Info] Real-time rendering active...");
 
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            bool isInfinite = double.IsInfinity(durationSeconds);
+            int loopLimit = isInfinite ? int.MaxValue : totalFrames;
 
-            for (int frame = 0; frame < totalFrames; frame++)
+            for (int frame = 0; frame < loopLimit; frame++)
             {
+                if (ffmpegProcess.HasExited)
+                {
+                    break;
+                }
+
                 double currentTime = frame / (double)fps;
 
                 if (hasSmil)
@@ -215,11 +232,20 @@ namespace CastBlueScreen
                 await stdin.WriteAsync(screenshot, 0, screenshot.Length);
 
                 // Print rendering progress
-                double progress = (frame + 1) * 100.0 / totalFrames;
-                Console.Write($"\r[Rendering] Progress: {progress:F1}% ({frame + 1}/{totalFrames} frames)...");
+                if (isInfinite)
+                {
+                    Console.Write($"\r[Rendering] Live frame: {frame + 1}...");
+                }
+                else
+                {
+                    double progress = (frame + 1) * 100.0 / totalFrames;
+                    Console.Write($"\r[Rendering] Progress: {progress:F1}% ({frame + 1}/{totalFrames} frames)...");
+                }
             }
 
-            Console.WriteLine("\n[Rendering] Frame sequence completed. Finalizing MP4 encode...");
+            Console.WriteLine(isInfinite 
+                ? "\n[Rendering] Live render stopped." 
+                : "\n[Rendering] Frame sequence completed. Finalizing MP4 encode...");
             stdin.Close();
             await ffmpegProcess.WaitForExitAsync();
         }
