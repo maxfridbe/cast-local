@@ -62,25 +62,47 @@ Pass a local audio file (MP3, AAC, FLAC, WAV, M4A, etc.) directly. Native audio 
 ./bin/Release/net10.0/linux-x64/publish/cast-local "/var/home/maxfridbe/Music/favorite_song.mp3" --cc 1
 ```
 
-### 3. Network Scan Mode (`--scan`)
+### 3. HTML, SVG, and Web URL Casting Mode (Chromium-to-MP4)
+Since standard Chromecast receivers cannot render complex offline SVG animations, local HTML files, or remote pages with custom layouts, this utility embeds a headless browser engine (`PuppeteerSharp`). 
+
+When passed a local `.svg`, `.html`, `.htm` file, or a remote web URL (starting with `http://` or `https://`), the utility launches Chromium, navigates to the page (waiting for the network resources to idle), waits for an optional custom initialization delay, and records the screen frame-by-frame into a high-quality H.264 MP4 movie using `ffmpeg`.
+
+Options for page rendering:
+* `-r, --resolution <WxH>`: Specify viewport resolution (e.g. `1280x720`, default `1920x1080`).
+* `-d, --duration <time>`: Specify playtime duration of the compiled movie (e.g. `10s`, `1m`, default `30s`).
+* `-y, --delay <time>`: Wait delay (e.g. `3s`, default `0s`) after page load to allow assets, APIs, and scripts to settle before starting the frame capture.
+* `-p, --preview`: Completely bypass network discovery/Chromecast connections and play the rendered stream in a local `ffplay` window. Perfect for offline template testing.
+
+```bash
+# Render a local animated SVG and preview it locally
+cast-local "/path/to/animation.svg" --duration 10s --resolution 1280x720 --preview
+
+# Load Hacker News, wait 2 seconds for assets to settle, render 10 seconds of it, and preview
+cast-local "https://news.ycombinator.com" --delay 2s --duration 10s --preview
+
+# Render Google.com with a 3-second delay, compile a 10s video, and cast it to TV device #1
+cast-local "https://www.google.com" --delay 3s --duration 10s --cc 1
+```
+
+### 4. Network Scan Mode (`--scan`)
 Perform a discovery scan on network interfaces and probe the Living Room TV directly, printing out all discovered Cast-enabled devices and exiting:
 ```bash
 ./bin/Release/net10.0/linux-x64/publish/cast-local --scan
 ```
 
-### 4. Interactive Mode (Auto-Scan)
+### 5. Interactive Mode (Auto-Scan)
 Scans network adapters and probes the Living Room TV (`192.168.50.109`) in parallel. If multiple displays are resolved, it displays a numbered menu:
 ```bash
 ./bin/Release/net10.0/linux-x64/publish/cast-local
 ```
 
-### 5. Selector Mode (`--cc`)
+### 6. Selector Mode (`--cc`)
 Select a specific discovered device by its index when multiple options are present:
 ```bash
 ./bin/Release/net10.0/linux-x64/publish/cast-local --cc 1
 ```
 
-### 6. Direct IP Mode
+### 7. Direct IP Mode
 Manually specify the TV's IP address to bypass discovery completely:
 ```bash
 ./bin/Release/net10.0/linux-x64/publish/cast-local 192.168.50.109
@@ -98,4 +120,5 @@ dotnet publish -c Release
 ```
 
 The output binary will be generated at:
-/cast-local/bin/Release/net10.0/linux-x64/publish/cast-local (approx. 75 MB).
+`bin/Release/net10.0/linux-x64/publish/cast-local` (approx. 75 MB).
+

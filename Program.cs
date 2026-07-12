@@ -38,8 +38,10 @@ namespace CastBlueScreen
             bool isLiveFlag = false;
             bool scanMode = false;
             bool previewMode = false;
+            bool isWebUrl = false;
             string resolutionStr = "1920x1080";
             string durationStr = "30s";
+            string delayStr = "0s";
 
             // Parse arguments
             for (int i = 0; i < args.Length; i++)
@@ -82,6 +84,17 @@ namespace CastBlueScreen
                     durationStr = args[i + 1];
                     i++;
                 }
+                else if ((args[i] == "--delay" || args[i] == "-y") && i + 1 < args.Length)
+                {
+                    delayStr = args[i + 1];
+                    i++;
+                }
+                else if (args[i].StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
+                         args[i].StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    MediaServer._sourceFilePath = args[i];
+                    isWebUrl = true;
+                }
                 else if (IPAddress.TryParse(args[i], out _))
                 {
                     targetIp = args[i];
@@ -89,11 +102,22 @@ namespace CastBlueScreen
                 else
                 {
                     MediaServer._sourceFilePath = Path.GetFullPath(args[i]);
+                    isWebUrl = false;
                 }
             }
 
             MediaServer._contentSize = contentSize;
             MediaServer._isLiveMode = isLiveFlag;
+
+            double delaySeconds = 0;
+            if (delayStr.EndsWith("s", StringComparison.OrdinalIgnoreCase))
+            {
+                delayStr = delayStr.Substring(0, delayStr.Length - 1);
+            }
+            if (double.TryParse(delayStr, out double del))
+            {
+                delaySeconds = del;
+            }
 
             byte[] imageBytes = MediaServer.BluePngBytes;
             bool isVideo = false;
@@ -101,7 +125,7 @@ namespace CastBlueScreen
 
             if (MediaServer._sourceFilePath != null)
             {
-                if (!File.Exists(MediaServer._sourceFilePath))
+                if (!isWebUrl && !File.Exists(MediaServer._sourceFilePath))
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine($"[Error] Source file not found: {MediaServer._sourceFilePath}");
@@ -109,8 +133,8 @@ namespace CastBlueScreen
                     return;
                 }
 
-                string inputExt = Path.GetExtension(MediaServer._sourceFilePath).ToLowerInvariant();
-                if (inputExt == ".svg" || inputExt == ".html" || inputExt == ".htm")
+                string inputExt = isWebUrl ? "" : Path.GetExtension(MediaServer._sourceFilePath).ToLowerInvariant();
+                if (isWebUrl || inputExt == ".svg" || inputExt == ".html" || inputExt == ".htm")
                 {
                     int width = 1920;
                     int height = 1080;
@@ -134,8 +158,8 @@ namespace CastBlueScreen
                     string compiledMp4 = Path.Combine(Path.GetTempPath(), "rendered_web_" + Guid.NewGuid().ToString("N") + ".mp4");
                     try
                     {
-                        Console.WriteLine($"[Info] HTML/SVG source detected. Rendering page to MP4 at {width}x{height} for {durationSeconds} seconds...");
-                        await FfmpegUtils.RenderWebPageToMp4Async(MediaServer._sourceFilePath, compiledMp4, width, height, durationSeconds);
+                        Console.WriteLine($"[Info] {(isWebUrl ? "Web URL" : "HTML/SVG")} source detected. Rendering page to MP4 at {width}x{height} for {durationSeconds} seconds...");
+                        await FfmpegUtils.RenderWebPageToMp4Async(MediaServer._sourceFilePath, compiledMp4, width, height, durationSeconds, delaySeconds);
                         
                         MediaServer._renderedHtmlPath = compiledMp4;
                         MediaServer._sourceFilePath = compiledMp4;
@@ -143,7 +167,7 @@ namespace CastBlueScreen
                     catch (Exception ex)
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[Error] Failed to render HTML/SVG file: {ex.Message}");
+                        Console.WriteLine($"[Error] Failed to render HTML/SVG/URL source: {ex.Message}");
                         Console.ResetColor();
                         if (File.Exists(compiledMp4)) File.Delete(compiledMp4);
                         return;
@@ -838,8 +862,9 @@ namespace CastBlueScreen
             Console.WriteLine("  --cc <index>     Auto-select a discovered device by its 1-based index.");
             Console.WriteLine("  --size <bytes>   Specify the estimated total size of the stream in bytes.");
             Console.WriteLine("  --live           Use legacy live transcoding mode (fragmented MP4) instead of HLS.");
-            Console.WriteLine("  -r, --resolution Specify viewport resolution for SVG/HTML rendering (e.g. 1920x1080, default 1920x1080).");
-            Console.WriteLine("  -d, --duration   Specify playtime duration for SVG/HTML rendering (e.g. 30s or 30, default 30s).");
+            Console.WriteLine("  -r, --resolution Specify viewport resolution for SVG/HTML/URL rendering (e.g. 1920x1080, default 1920x1080).");
+            Console.WriteLine("  -d, --duration   Specify playtime duration for SVG/HTML/URL rendering (e.g. 30s or 30, default 30s).");
+            Console.WriteLine("  -y, --delay      Specify load wait delay before recording frames (e.g. 3s or 3, default 0s).");
             Console.WriteLine("  -p, --preview    Launch a local ffplay preview window showing exactly what will be cast.\n");
             Console.WriteLine("Examples:");
             Console.WriteLine("  cast-local --scan");

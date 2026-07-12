@@ -63,7 +63,7 @@ namespace CastBlueScreen
             return false;
         }
 
-        public static async Task RenderWebPageToMp4Async(string inputFilePath, string outputMp4Path, int width, int height, double durationSeconds)
+        public static async Task RenderWebPageToMp4Async(string inputFilePath, string outputMp4Path, int width, int height, double durationSeconds, double delaySeconds = 0)
         {
             Console.WriteLine("[Info] Downloading/verifying headless Chromium binary...");
             var browserFetcher = new BrowserFetcher();
@@ -76,7 +76,7 @@ namespace CastBlueScreen
                 Args = new[] { "--no-sandbox" }
             });
 
-            Console.WriteLine("[Info] Loading input file into Chromium viewport...");
+            Console.WriteLine("[Info] Loading input URL/file into Chromium viewport...");
             using var page = await browser.NewPageAsync();
 
             // Set viewport to specified resolution
@@ -86,8 +86,16 @@ namespace CastBlueScreen
                 Height = height
             });
 
-            // Load page content based on file type
-            if (inputFilePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+            // Load page content based on URL/file type
+            if (inputFilePath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || 
+                inputFilePath.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                await page.GoToAsync(inputFilePath, new NavigationOptions
+                {
+                    WaitUntil = new[] { WaitUntilNavigation.Networkidle2 }
+                });
+            }
+            else if (inputFilePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
             {
                 string svgContent = File.ReadAllText(inputFilePath);
                 string htmlContent = $@"
@@ -123,12 +131,21 @@ namespace CastBlueScreen
             else
             {
                 string fileUrl = new Uri(Path.GetFullPath(inputFilePath)).AbsoluteUri;
-                await page.GoToAsync(fileUrl);
+                await page.GoToAsync(fileUrl, new NavigationOptions
+                {
+                    WaitUntil = new[] { WaitUntilNavigation.Networkidle2 }
+                });
 
                 await page.AddStyleTagAsync(new AddTagOptions
                 {
                     Content = "html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: black; }"
                 });
+            }
+
+            if (delaySeconds > 0)
+            {
+                Console.WriteLine($"[Info] Waiting {delaySeconds:F1} seconds for page to initialize...");
+                await Task.Delay((int)(delaySeconds * 1000));
             }
 
             // Start ffmpeg process for streaming screenshot frames
