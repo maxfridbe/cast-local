@@ -37,6 +37,8 @@ namespace CastBlueScreen
             long? contentSize = null;
             bool isLiveFlag = false;
             bool scanMode = false;
+            string resolutionStr = "1920x1080";
+            string durationStr = "30s";
 
             // Parse arguments
             for (int i = 0; i < args.Length; i++)
@@ -65,6 +67,16 @@ namespace CastBlueScreen
                 {
                     scanMode = true;
                 }
+                else if ((args[i] == "--resolution" || args[i] == "-r") && i + 1 < args.Length)
+                {
+                    resolutionStr = args[i + 1];
+                    i++;
+                }
+                else if ((args[i] == "--duration" || args[i] == "-d") && i + 1 < args.Length)
+                {
+                    durationStr = args[i + 1];
+                    i++;
+                }
                 else if (IPAddress.TryParse(args[i], out _))
                 {
                     targetIp = args[i];
@@ -90,6 +102,47 @@ namespace CastBlueScreen
                     Console.WriteLine($"[Error] Source file not found: {MediaServer._sourceFilePath}");
                     Console.ResetColor();
                     return;
+                }
+
+                string inputExt = Path.GetExtension(MediaServer._sourceFilePath).ToLowerInvariant();
+                if (inputExt == ".svg" || inputExt == ".html" || inputExt == ".htm")
+                {
+                    int width = 1920;
+                    int height = 1080;
+                    var parts = resolutionStr.Split('x');
+                    if (parts.Length == 2 && int.TryParse(parts[0], out int w) && int.TryParse(parts[1], out int h))
+                    {
+                        width = w;
+                        height = h;
+                    }
+
+                    double durationSeconds = 30;
+                    if (durationStr.EndsWith("s", StringComparison.OrdinalIgnoreCase))
+                    {
+                        durationStr = durationStr.Substring(0, durationStr.Length - 1);
+                    }
+                    if (double.TryParse(durationStr, out double dur))
+                    {
+                        durationSeconds = dur;
+                    }
+
+                    string compiledMp4 = Path.Combine(Path.GetTempPath(), "rendered_web_" + Guid.NewGuid().ToString("N") + ".mp4");
+                    try
+                    {
+                        Console.WriteLine($"[Info] HTML/SVG source detected. Rendering page to MP4 at {width}x{height} for {durationSeconds} seconds...");
+                        await FfmpegUtils.RenderWebPageToMp4Async(MediaServer._sourceFilePath, compiledMp4, width, height, durationSeconds);
+                        
+                        MediaServer._renderedHtmlPath = compiledMp4;
+                        MediaServer._sourceFilePath = compiledMp4;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[Error] Failed to render HTML/SVG file: {ex.Message}");
+                        Console.ResetColor();
+                        if (File.Exists(compiledMp4)) File.Delete(compiledMp4);
+                        return;
+                    }
                 }
 
                 bool hasVideo = await FfmpegUtils.HasVideoAsync(MediaServer._sourceFilePath);
@@ -134,7 +187,7 @@ namespace CastBlueScreen
 
                     string ffmpegMapArgs = MediaServer._isAudioOnly 
                         ? "-map 0:a:0 -vn -c:a aac -ac 2" 
-                        : "-map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2";
+                        : "-map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2";
 
                     var hlsStartInfo = new ProcessStartInfo
                     {
@@ -222,7 +275,7 @@ namespace CastBlueScreen
                         var startInfo = new ProcessStartInfo
                         {
                             FileName = "ffmpeg",
-                            Arguments = $"-i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
+                            Arguments = $"-i \"{MediaServer._sourceFilePath}\" -map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{MediaServer._tempFilePath}\"",
                             UseShellExecute = false,
                             CreateNoWindow = true
                         };
@@ -648,6 +701,10 @@ namespace CastBlueScreen
                 {
                     try { File.Delete(MediaServer._tempFilePath); } catch { }
                 }
+                if (MediaServer._renderedHtmlPath != null && File.Exists(MediaServer._renderedHtmlPath))
+                {
+                    try { File.Delete(MediaServer._renderedHtmlPath); } catch { }
+                }
                 if (MediaServer._hlsDir != null && Directory.Exists(MediaServer._hlsDir))
                 {
                     try { Directory.Delete(MediaServer._hlsDir, true); } catch { }
@@ -682,7 +739,9 @@ namespace CastBlueScreen
             Console.WriteLine("  --scan           Scan the local network for Cast devices, list them, and exit.");
             Console.WriteLine("  --cc <index>     Auto-select a discovered device by its 1-based index.");
             Console.WriteLine("  --size <bytes>   Specify the estimated total size of the stream in bytes.");
-            Console.WriteLine("  --live           Use legacy live transcoding mode (fragmented MP4) instead of HLS.\n");
+            Console.WriteLine("  --live           Use legacy live transcoding mode (fragmented MP4) instead of HLS.");
+            Console.WriteLine("  -r, --resolution Specify viewport resolution for SVG/HTML rendering (e.g. 1920x1080, default 1920x1080).");
+            Console.WriteLine("  -d, --duration   Specify playtime duration for SVG/HTML rendering (e.g. 30s or 30, default 30s).\n");
             Console.WriteLine("Examples:");
             Console.WriteLine("  cast-local --scan");
             Console.WriteLine("  cast-local \"/path/to/video.mkv\"");

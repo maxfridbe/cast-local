@@ -28,6 +28,7 @@ namespace CastBlueScreen
         public static bool _isLiveMode = false;
         public static bool _isAudioOnly = false;
         public static bool _isTranscoding = false;
+        public static string? _renderedHtmlPath = null;
 
         public static (HttpListener listener, int port) StartHttpServer(string localIp)
         {
@@ -164,8 +165,8 @@ namespace CastBlueScreen
                                              _currentSeekSeconds = querySeek;
 
                                              string mapArgs = _isAudioOnly 
-                                                 ? "-map 0:a:0 -vn -c:a libmp3lame -q:a 2" 
-                                                 : "-map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2";
+                                                 ? "-map 0:a:0? -vn -c:a libmp3lame -q:a 2" 
+                                                 : "-map 0:v:0 -map 0:a:0? -sn -c:v copy -c:a aac -ac 2";
 
                                              var startInfo = new ProcessStartInfo
                                              {

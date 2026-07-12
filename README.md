@@ -5,6 +5,7 @@ A high-performance C# (.NET 10) console utility designed to cast static images, 
 ---
 
 ## 💡 Why This Tool Was Built
+I wanted a way to cast anything to the chromecast from the command line.
 
 Standard Google Cast applications depend heavily on **multicast DNS (mDNS)** discovery. However, mDNS traffic is frequently dropped by wireless routers (due to AP isolation or IGMP snooping) or blocked when running applications inside containers, VMs, or under VPNs like Tailscale. 
 
@@ -97,4 +98,4 @@ dotnet publish -c Release
 ```
 
 The output binary will be generated at:
-[cast-local](file:///var/home/maxfridbe/Dev/vibecoding/cast-local/bin/Release/net10.0/linux-x64/publish/cast-local) (approx. 75 MB).
+/cast-local/bin/Release/net10.0/linux-x64/publish/cast-local (approx. 75 MB).

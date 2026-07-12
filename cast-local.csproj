@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="GoogleCast" Version="1.7.0" />
+    <PackageReference Include="PuppeteerSharp" Version="25.3.3" />
   </ItemGroup>
 
 </Project>

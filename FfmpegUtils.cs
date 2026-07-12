@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Threading.Tasks;
+using PuppeteerSharp;
 
 namespace CastBlueScreen
 {
@@ -59,6 +61,150 @@ namespace CastBlueScreen
             }
             catch { }
             return false;
+        }
+
+        public static async Task RenderWebPageToMp4Async(string inputFilePath, string outputMp4Path, int width, int height, double durationSeconds)
+        {
+            Console.WriteLine("[Info] Downloading/verifying headless Chromium binary...");
+            var browserFetcher = new BrowserFetcher();
+            await browserFetcher.DownloadAsync();
+
+            Console.WriteLine("[Info] Starting headless Chromium browser...");
+            using var browser = await Puppeteer.LaunchAsync(new LaunchOptions
+            {
+                Headless = true,
+                Args = new[] { "--no-sandbox" }
+            });
+
+            Console.WriteLine("[Info] Loading input file into Chromium viewport...");
+            using var page = await browser.NewPageAsync();
+
+            // Set viewport to specified resolution
+            await page.SetViewportAsync(new ViewPortOptions
+            {
+                Width = width,
+                Height = height
+            });
+
+            // Load page content based on file type
+            if (inputFilePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+            {
+                string svgContent = File.ReadAllText(inputFilePath);
+                string htmlContent = $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }}
+        svg {{
+            width: 100%;
+            height: 100%;
+            max-width: 100%;
+            max-height: 100%;
+        }}
+    </style>
+</head>
+<body>
+    {svgContent}
+</body>
+</html>";
+                await page.SetContentAsync(htmlContent);
+            }
+            else
+            {
+                string fileUrl = new Uri(Path.GetFullPath(inputFilePath)).AbsoluteUri;
+                await page.GoToAsync(fileUrl);
+
+                await page.AddStyleTagAsync(new AddTagOptions
+                {
+                    Content = "html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: black; }"
+                });
+            }
+
+            // Start ffmpeg process for streaming screenshot frames
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "ffmpeg",
+                Arguments = $"-y -f image2pipe -framerate 30 -i - -c:v libx264 -pix_fmt yuv420p -b:v 4000k \"{outputMp4Path}\"",
+                RedirectStandardInput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var ffmpegProcess = Process.Start(startInfo);
+            if (ffmpegProcess == null)
+            {
+                throw new Exception("Failed to start FFmpeg worker process.");
+            }
+
+            using var stdin = ffmpegProcess.StandardInput.BaseStream;
+            int fps = 30;
+            int totalFrames = (int)(durationSeconds * fps);
+            double frameDelayMs = 1000.0 / fps;
+
+            // Try to detect and pause SMIL animations
+            bool hasSmil = await page.EvaluateFunctionAsync<bool>(@"() => {
+                const svg = document.querySelector('svg');
+                if (svg && typeof svg.setCurrentTime === 'function') {
+                    try {
+                        svg.pauseAnimations();
+                        return true;
+                    } catch { }
+                }
+                return false;
+            }");
+
+            Console.WriteLine(hasSmil 
+                ? "[Info] SMIL animations detected. Enabling frame-accurate rendering..." 
+                : "[Info] Real-time rendering active...");
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            for (int frame = 0; frame < totalFrames; frame++)
+            {
+                double currentTime = frame / (double)fps;
+
+                if (hasSmil)
+                {
+                    await page.EvaluateFunctionAsync("function(t) { const svg = document.querySelector('svg'); if (svg) svg.setCurrentTime(t); }", currentTime);
+                }
+                else
+                {
+                    double targetElapsedMs = frame * frameDelayMs;
+                    double actualElapsedMs = stopwatch.ElapsedMilliseconds;
+                    if (targetElapsedMs > actualElapsedMs)
+                    {
+                        await Task.Delay((int)(targetElapsedMs - actualElapsedMs));
+                    }
+                }
+
+                // Capture viewport frame screenshot as PNG
+                byte[] screenshot = await page.ScreenshotDataAsync(new ScreenshotOptions
+                {
+                    Type = ScreenshotType.Png
+                });
+
+                // Write PNG bytes to FFmpeg stdin pipe
+                await stdin.WriteAsync(screenshot, 0, screenshot.Length);
+
+                // Print rendering progress
+                double progress = (frame + 1) * 100.0 / totalFrames;
+                Console.Write($"\r[Rendering] Progress: {progress:F1}% ({frame + 1}/{totalFrames} frames)...");
+            }
+
+            Console.WriteLine("\n[Rendering] Frame sequence completed. Finalizing MP4 encode...");
+            stdin.Close();
+            await ffmpegProcess.WaitForExitAsync();
         }
     }
 }
