@@ -11,3 +11,7 @@
 .vs/
 .idea/
 .vscode/
+
+# Media files
+output.mp4
+
