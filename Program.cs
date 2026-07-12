@@ -32,6 +32,7 @@ namespace CastBlueScreen
         private static long _sourceFileSize = 0;
         private static double _sourceDuration = 0;
         private static string? _tempFilePath = null;
+        private static string? _hlsDir = null;
         private static Process? _transcodeProcess = null;
         private static double _currentSeekSeconds = 0;
         private static SemaphoreSlim _transcodeLock = new SemaphoreSlim(1, 1);
@@ -103,49 +104,104 @@ namespace CastBlueScreen
                 Console.WriteLine($"[Info] Local file transcoding proxy mode initialized for: {_sourceFilePath}");
                 Console.WriteLine($"[Info] File Size: {_sourceFileSize} bytes, Duration: {_sourceDuration:F2} seconds");
 
-                _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
-                Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
-
-                var startInfo = new ProcessStartInfo
+                if (!_isLiveMode)
                 {
-                    FileName = "ffmpeg",
-                    Arguments = $"-i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
+                    // HLS mode (default for local files): transcode to an HLS event playlist.
+                    // The Chromecast default receiver plays HLS natively with a real, growing
+                    // timeline, so remote seeking works without any interception hacks.
+                    _hlsDir = Path.Combine(Path.GetTempPath(), "cast_hls_" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(_hlsDir);
+                    Console.WriteLine($"[Info] Initializing background HLS transcoding to: {_hlsDir}");
 
-                _transcodeProcess = Process.Start(startInfo);
-
-                // Pre-buffer 15MB to prevent TV startup timeouts
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("[Info] Pre-buffering transcode cache to ensure smooth TV startup. Please wait...");
-                Console.ResetColor();
-
-                long targetPrebuffer = Math.Min(15000000L, _sourceFileSize);
-                while (true)
-                {
-                    if (File.Exists(_tempFilePath))
+                    var hlsStartInfo = new ProcessStartInfo
                     {
-                        long currentSize = new FileInfo(_tempFilePath).Length;
-                        if (currentSize >= targetPrebuffer)
+                        FileName = "ffmpeg",
+                        Arguments = $"-i \"{_sourceFilePath}\" -map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2 " +
+                                    $"-f hls -hls_time 4 -hls_playlist_type event -hls_flags independent_segments " +
+                                    $"-hls_segment_filename \"{Path.Combine(_hlsDir, "seg%05d.ts")}\" -y \"{Path.Combine(_hlsDir, "index.m3u8")}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    _transcodeProcess = Process.Start(hlsStartInfo);
+
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[Info] Waiting for initial HLS segments before casting...");
+                    Console.ResetColor();
+
+                    string playlistPath = Path.Combine(_hlsDir, "index.m3u8");
+                    while (true)
+                    {
+                        if (File.Exists(playlistPath))
+                        {
+                            int segmentCount = 0;
+                            try
+                            {
+                                segmentCount = File.ReadAllLines(playlistPath).Count(l => l.StartsWith("#EXTINF"));
+                            }
+                            catch { }
+                            Console.Write($"\r[Pre-buffer] {segmentCount} segment(s) ready...");
+                            if (segmentCount >= 3) break;
+                        }
+                        else
+                        {
+                            Console.Write("\r[Pre-buffer] Waiting for transcode stream to start...");
+                        }
+
+                        if (_transcodeProcess != null && _transcodeProcess.HasExited)
                         {
                             break;
                         }
-                        double progressPercent = (double)currentSize / targetPrebuffer * 100.0;
-                        Console.Write($"\r[Pre-buffer] Progress: {progressPercent:F1}% ({currentSize / 1024 / 1024}MB / {targetPrebuffer / 1024 / 1024}MB)...");
+                        await Task.Delay(250);
                     }
-                    else
-                    {
-                        Console.Write("\r[Pre-buffer] Waiting for transcode stream to start...");
-                    }
-
-                    if (_transcodeProcess != null && _transcodeProcess.HasExited)
-                    {
-                        break;
-                    }
-                    await Task.Delay(250);
+                    Console.WriteLine("\n[Info] Initial HLS segments ready! Launching cast...");
                 }
-                Console.WriteLine("\n[Info] Pre-buffering complete! Launching cast...");
+                else
+                {
+                    _tempFilePath = Path.Combine(Path.GetTempPath(), "cast_temp_" + Guid.NewGuid().ToString() + ".mp4");
+                    Console.WriteLine($"[Info] Initializing background transcoding to: {_tempFilePath}");
+
+                    var startInfo = new ProcessStartInfo
+                    {
+                        FileName = "ffmpeg",
+                        Arguments = $"-i \"{_sourceFilePath}\" -map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    _transcodeProcess = Process.Start(startInfo);
+
+                    // Pre-buffer 15MB to prevent TV startup timeouts
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[Info] Pre-buffering transcode cache to ensure smooth TV startup. Please wait...");
+                    Console.ResetColor();
+
+                    long targetPrebuffer = Math.Min(15000000L, _sourceFileSize);
+                    while (true)
+                    {
+                        if (File.Exists(_tempFilePath))
+                        {
+                            long currentSize = new FileInfo(_tempFilePath).Length;
+                            if (currentSize >= targetPrebuffer)
+                            {
+                                break;
+                            }
+                            double progressPercent = (double)currentSize / targetPrebuffer * 100.0;
+                            Console.Write($"\r[Pre-buffer] Progress: {progressPercent:F1}% ({currentSize / 1024 / 1024}MB / {targetPrebuffer / 1024 / 1024}MB)...");
+                        }
+                        else
+                        {
+                            Console.Write("\r[Pre-buffer] Waiting for transcode stream to start...");
+                        }
+
+                        if (_transcodeProcess != null && _transcodeProcess.HasExited)
+                        {
+                            break;
+                        }
+                        await Task.Delay(250);
+                    }
+                    Console.WriteLine("\n[Info] Pre-buffering complete! Launching cast...");
+                }
 
                 // Auto-select first device if not specified
                 if (targetIp == null && ccIndex == null)
@@ -397,10 +453,11 @@ namespace CastBlueScreen
                 var mediaChannel = sender.GetChannel<IMediaChannel>();
                 await sender.LaunchAsync(mediaChannel);
 
-                string mimeType = _sourceFilePath != null ? "video/mp4" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
+                string mimeType = _hlsDir != null ? "application/x-mpegURL" : (_sourceFilePath != null ? "video/mp4" : (isPiped ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes)));
 
                 string extension = mimeType switch
                 {
+                    "application/x-mpegURL" => "m3u8",
                     "video/mp4" => "mp4",
                     "video/webm" => "webm",
                     "image/jpeg" => "jpg",
@@ -477,7 +534,8 @@ namespace CastBlueScreen
                                 }
 
                                 DateTime now = DateTime.UtcNow;
-                                if (status.PlayerState == "PLAYING" && !isFirstStatus && lastPlayerState == "PLAYING")
+                                // HLS mode: the receiver seeks natively within the playlist; no interception needed.
+                                if (_hlsDir == null && status.PlayerState == "PLAYING" && !isFirstStatus && lastPlayerState == "PLAYING")
                                 {
                                     double timeDelta = (now - lastCheckTime).TotalSeconds;
                                     double expectedTime = lastCurrentTime + timeDelta;
@@ -543,9 +601,12 @@ namespace CastBlueScreen
                     Console.WriteLine("Casting. Press [Enter] or [Ctrl+C] to stop casting and exit...");
                     var readLineTask = Task.Run(() => Console.ReadLine());
                     var completedTask = await Task.WhenAny(tcs.Task, readLineTask);
-                    if (completedTask == tcs.Task)
+                    if (completedTask == readLineTask && readLineTask.Result == null)
                     {
-                        // Woken by background task status (playback finished or TV disconnected)
+                        // stdin is closed (e.g. running detached/background): don't exit on EOF,
+                        // keep serving until playback finishes or the process is signalled.
+                        Console.WriteLine("[Info] No interactive console detected. Running until playback finishes (Ctrl+C to stop).");
+                        await tcs.Task;
                     }
                 }
             }
@@ -569,6 +630,10 @@ namespace CastBlueScreen
                 if (_tempFilePath != null && File.Exists(_tempFilePath))
                 {
                     try { File.Delete(_tempFilePath); } catch { }
+                }
+                if (_hlsDir != null && Directory.Exists(_hlsDir))
+                {
+                    try { Directory.Delete(_hlsDir, true); } catch { }
                 }
 
                 Console.WriteLine("[Info] Stopping web server and disconnecting...");
@@ -723,7 +788,11 @@ namespace CastBlueScreen
                         {
                             string mimeType = _sourceFilePath != null ? "video/mp4" : (_pipedStream != null ? GetMimeType(imageBytes, _preReadLength) : GetMimeType(imageBytes));
 
-                            if (_sourceFilePath != null)
+                            if (_hlsDir != null)
+                            {
+                                await ServeHlsAsync(request, response);
+                            }
+                            else if (_sourceFilePath != null)
                             {
                                 long totalSize = _sourceFileSize;
                                 response.ContentType = mimeType;
@@ -804,7 +873,7 @@ namespace CastBlueScreen
                                              var startInfo = new ProcessStartInfo
                                              {
                                                  FileName = "ffmpeg",
-                                                 Arguments = $"-ss {querySeek:F2} -i \"{_sourceFilePath}\" -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
+                                                 Arguments = $"-ss {querySeek:F2} -i \"{_sourceFilePath}\" -map 0:v:0 -map 0:a:0 -sn -c:v copy -c:a aac -ac 2 -movflags frag_keyframe+empty_moov -y \"{_tempFilePath}\"",
                                                  UseShellExecute = false,
                                                  CreateNoWindow = true
                                              };
@@ -856,7 +925,9 @@ namespace CastBlueScreen
 
                                                      var stopwatch = System.Diagnostics.Stopwatch.StartNew();
                                                      long totalBytesSent = 0;
-                                                     double maxBytesPerSecond = 350 * 1024; // 350 KB/s throttle limit to keep Wi-Fi clear (5x playback rate)
+                                                     // Throttle at 3x the source's average byte rate (floor 700 KB/s) so playback never starves
+                                                     double sourceByteRate = _sourceDuration > 0 ? _sourceFileSize / _sourceDuration : 700 * 1024;
+                                                     double maxBytesPerSecond = Math.Max(700 * 1024, sourceByteRate * 3);
 
                                                      while (bytesRemaining > 0)
                                                      {
@@ -1037,6 +1108,61 @@ namespace CastBlueScreen
                 {
                     if (!listener.IsListening) break;
                 }
+            }
+        }
+
+        static async Task ServeHlsAsync(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            response.AddHeader("Access-Control-Allow-Origin", "*");
+            response.AddHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+            response.AddHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+
+            if (request.HttpMethod == "OPTIONS")
+            {
+                response.StatusCode = (int)HttpStatusCode.NoContent;
+                response.Close();
+                return;
+            }
+
+            string requestedFile = Path.GetFileName(request.Url?.AbsolutePath ?? "/") ?? "";
+            // Any *.m3u8 request (e.g. our cache-busted /media.m3u8) maps to the ffmpeg playlist.
+            if (requestedFile.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) || requestedFile.Length == 0)
+            {
+                requestedFile = "index.m3u8";
+            }
+
+            string fullPath = Path.Combine(_hlsDir!, requestedFile);
+            if (!File.Exists(fullPath))
+            {
+                Console.WriteLine($"[HTTP Server] HLS file not found: {requestedFile}");
+                response.StatusCode = (int)HttpStatusCode.NotFound;
+                response.Close();
+                return;
+            }
+
+            bool isPlaylist = requestedFile.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+            response.ContentType = isPlaylist ? "application/vnd.apple.mpegurl" : "video/mp2t";
+            if (isPlaylist)
+            {
+                // The event playlist grows while transcoding; the receiver must always re-fetch it.
+                response.AddHeader("Cache-Control", "no-cache, no-store");
+            }
+
+            try
+            {
+                byte[] fileBytes = await File.ReadAllBytesAsync(fullPath);
+                response.StatusCode = (int)HttpStatusCode.OK;
+                response.ContentLength64 = fileBytes.Length;
+                Console.WriteLine($"[HTTP Server] Serving HLS {(isPlaylist ? "playlist" : "segment")}: {requestedFile} ({fileBytes.Length} bytes)");
+                using (var output = response.OutputStream)
+                {
+                    await output.WriteAsync(fileBytes, 0, fileBytes.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[HTTP Server] HLS serving interrupted for {requestedFile}: {ex.Message}");
+                try { response.Abort(); } catch { }
             }
         }
 

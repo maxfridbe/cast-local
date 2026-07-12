@@ -12,7 +12,7 @@ To solve this, this utility combines multiple strategies:
 1. **Parallel Multi-Interface mDNS Scan**: Searches all active multicast-capable network adapters.
 2. **Direct TCP/REST Probing**: Probes targeted TV IPs on Google Cast ports (`8009` and `8008`) to resolve devices directly, bypassing mDNS entirely.
 3. **Smart Local Route Resolution**: Uses UDP socket binding towards the TV IP to query the OS routing table and determine which local interface is actually routable to the TV, avoiding routing failures caused by VPNs/virtual adapters.
-4. **VLC-Style Dynamic Transcode Caching**: For local video files, it transcodes to a temporary buffer in the background and serves byte-perfect HTTP 206 Range Requests, allowing native timeline scrubbing/seeking on the TV.
+4. **HLS Event-Playlist Transcoding**: For local video files, it transcodes in the background into a growing HLS playlist (video stream-copied when possible, audio converted to stereo AAC). The Chromecast default receiver plays HLS natively, so timeline scrubbing/seeking works natively within the transcoded window, which expands to the full movie in minutes.
 5. **Caching Read-Ahead Proxy Stream**: For piped streams, it replays pre-buffered bytes from memory to satisfy the Chromecast's multi-request connection sequence.
 6. **Cache Busting**: Generates unique timestamped URLs for every cast request to bypass Chromecast's aggressive receiver cache.
 
@@ -23,11 +23,11 @@ To solve this, this utility combines multiple strategies:
 ```mermaid
 graph TD
     Input[MKV/MP4 Video File] -->|1. Start Transcode| Ffmpeg[FFmpeg Worker Process]
-    Ffmpeg -->|2. Write Blocks| TempFile[Temp growing file /tmp/cast_temp_*.mp4]
-    TempFile -->|3. Read Chunks| Server[Embedded HTTP Server]
-    Server -->|4. Serve HTTP 206 Ranges| TV[Smart TV / Chromecast]
-    TV -->|5. Remote Seek Command| Server
-    Server -->|6. Seek in File Stream| TempFile
+    Ffmpeg -->|2. Write Segments| HlsDir[HLS dir /tmp/cast_hls_*/index.m3u8 + seg*.ts]
+    HlsDir -->|3. Read Playlist/Segments| Server[Embedded HTTP Server]
+    Server -->|4. Serve HLS over HTTP| TV[Smart TV / Chromecast]
+    TV -->|5. Native HLS Seek| Server
+    Server -->|6. Serve Requested Segment| HlsDir
 ```
 
 ---
@@ -38,20 +38,19 @@ graph TD
 * .NET 10 SDK (pre-configured on this system).
 * `ffmpeg` and `ffprobe` (for on-the-fly transcoding and metadata detection).
 
-### 1. Dynamic Seekable Local File Mode (VLC-Style)
-Pass a local video file (MKV, MP4, AVI, WebM) directly to the command. The tool will spawn `ffmpeg` in the background to transcode the video stream to a temporary MP4 file in real-time, allowing **full seeking capabilities** using your TV remote, phone, or Google Home app:
+### 1. Dynamic Seekable Local File Mode (HLS, default)
+Pass a local video file (MKV, MP4, AVI, WebM) directly to the command. The tool spawns `ffmpeg` in the background to transcode the video into a growing **HLS event playlist**. The Chromecast default receiver plays HLS natively, giving **real native seeking** with your TV remote, phone, or Google Home app — no seek interception needed. Right after startup you can seek within whatever has been transcoded so far; the window grows to the full movie within minutes (stream-copy typically runs 15-30x realtime):
 
 ```bash
-# Standard Buffered Mode (reports content size, probes headers)
+# HLS Mode (default): native timeline + native seeking
 ./bin/Release/net10.0/linux-x64/publish/cast-local "/var/home/maxfridbe/Videos/MaxFlix/Tri.kota.Zimnie.kanikuly.1080p-EniaHD.mkv"
 
-# Live Transcoding Mode (VLC-style, streams as an infinite live source)
-# Highly recommended for slower network connections / CIFS mounts
+# Legacy Live Transcoding Mode (VLC-style infinite live source with seek interception)
 ./bin/Release/net10.0/linux-x64/publish/cast-local --live "/var/home/maxfridbe/Videos/MaxFlix/Tri.kota.Zimnie.kanikuly.1080p-EniaHD.mkv"
 ```
 
 Options for local file casting:
-* `--live`: Forces the TV to treat the video as an infinite progressive live stream. This prevents the TV from seeking to the end of the file to parse headers (which can trigger slow network timeouts on Wi-Fi). Instead, remote seeks are intercepted by the status poller, which automatically restarts the backend transcoder from the seek point.
+* `--live`: Legacy fallback. Forces the TV to treat the video as an infinite progressive live stream served from a single growing fMP4 file, with remote seeks intercepted by the status poller (which restarts the backend transcoder from the seek point). Note: forward seeks are unreliable in this mode because the TV resets a live stream to zero on seek — prefer the default HLS mode.
 * `--size <bytes>`: Specify the estimated total size of the video stream in bytes (e.g., `--size 282000000` for 282MB) so that the TV can make standard range requests without chunked-encoding limitations.
 
 ### 2. Piped Progressive Live Mode
